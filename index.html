@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OLC // CENTRAL COMMAND SYSTEM</title>
+<link rel="icon" href="assets/logo_symbol.png">
+<link rel="apple-touch-icon" href="assets/logo_symbol.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="OLC">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0714">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Great+Vibes&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="authGate">
+  <div class="authbox panel">
+    <img src="assets/logo_symbol.png" alt="OLC">
+    <div class="authtabs">
+      <div class="authtab" id="authTabCreate" onclick="showAuthTab('create')">CREATE ID</div>
+      <div class="authtab" id="authTabLogin" onclick="showAuthTab('login')">ADD ID / LOGIN</div>
+    </div>
+    <div id="authCreatePane">
+      <div class="field"><label class="f">Codename</label><input type="text" id="ac_codename" placeholder="e.g. AGENT SK"></div>
+      <div class="field"><label class="f">Code ID</label><input type="text" id="ac_codeid" placeholder="e.g. SK7"></div>
+      <button class="btn" style="width:100%;" onclick="doCreateID()">Create ID &amp; Enter</button>
+      <div class="stat-label" style="margin-top:10px;">One device can hold multiple Agent IDs — each keeps its own separate data.</div>
+    </div>
+    <div id="authLoginPane" style="display:none;">
+      <div class="field"><label class="f">Codename</label><input type="text" id="al_codename" placeholder="Enter your Codename"></div>
+      <div class="field"><label class="f">Code ID</label><input type="text" id="al_codeid" placeholder="Enter your Code ID"></div>
+      <button class="btn" style="width:100%;" onclick="doLogin()">Add ID &amp; Enter</button>
+    </div>
+    <div id="authError"></div>
+  </div>
+</div>
+
+<div id="boot">
+  <div class="bootbox">
+    <div class="rk-wrap">
+      <svg class="rk-flower" viewBox="0 0 60 60" width="34" height="34">
+        <g transform="translate(30,30)">
+          <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1"/>
+          <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(72)"/>
+          <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(144)"/>
+          <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(216)"/>
+          <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(288)"/>
+          <circle cx="0" cy="0" r="5.5" fill="#ffd23f"/>
+        </g>
+      </svg>
+      <span class="rk-text">Radha</span>
+      <span class="rk-text">Krishna</span>
+      <svg class="rk-feather" viewBox="0 0 40 100" width="26" height="66">
+        <path d="M20 96 Q17 60 20 30" stroke="#4a7c59" stroke-width="2" fill="none"/>
+        <ellipse cx="20" cy="20" rx="15" ry="22" fill="#1c5a52"/>
+        <ellipse cx="20" cy="20" rx="10.5" ry="16" fill="#2f8f7a"/>
+        <ellipse cx="20" cy="20" rx="6.5" ry="10" fill="#3fb8a8"/>
+        <ellipse cx="20" cy="20" rx="3" ry="5" fill="#12312e"/>
+      </svg>
+    </div>
+    <img src="assets/logo_text.png" alt="Operation Life Change" style="width:100%; max-width:420px; display:block; margin:10px auto 22px; filter:drop-shadow(0 0 20px rgba(215,121,241,.45));">
+    <div class="bootline" style="animation-delay:.1s">&gt; INITIALIZING CENTRAL COMMAND SYSTEM...</div>
+    <div class="bootline" style="animation-delay:.5s">&gt; LOADING AGENT PROFILE...</div>
+    <div class="bootline" style="animation-delay:.9s">&gt; SYNCING MISSION DATA...</div>
+    <div class="bootline" style="animation-delay:1.3s">&gt; OPERATION LIFE CHANGE — STANDING BY</div>
+    <div class="bootbar"><i></i></div>
+  </div>
+</div>
+
+<div id="app">
+  <div class="topbar">
+    <button id="menuBtn" class="btn ghost sm" onclick="toggleSidebar()">☰</button>
+    <div class="brand" onclick="go('home')">
+      <img src="assets/logo_symbol.png" alt="OLC">
+      <div class="tt">OPERATION LIFE CHANGE<small>DISCIPLINE BEFORE MOTIVATION</small></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="hud-pill"><span class="dot"></span><span id="clockPill" class="mono">--:--:--</span></div>
+    <div class="hud-pill">RANK <b id="rankPillTxt">—</b></div>
+    <div class="hud-pill">DSS <b id="dssPillTxt">0</b>/100</div>
+    <div class="hud-pill">XP <b id="xpPillTxt">0</b></div>
+    <div class="themeToggle">
+      <button id="themeBtnDark" onclick="setTheme('dark')" title="Dark mode">🌙</button>
+      <button id="themeBtnLight" onclick="setTheme('light')" title="Light mode">☀️</button>
+    </div>
+    <div class="avatarBtn" onclick="go('profile')" title="Agent Profile">
+      <img src="assets/profile.png" alt="Agent">
+    </div>
+    <button class="btn ghost sm" onclick="lockApp()" title="Switch / Lock">🔒</button>
+  </div>
+
+  <div id="idCardModal">
+    <button class="idcard-close" onclick="closeIdCard()">✕</button>
+    <div>
+      <div class="idcard-scene">
+        <div class="idcard-3d" id="idCard3d" onclick="flipIdCard()">
+          <div class="idcard-face front"><img src="assets/id_front.jpg" alt="ID Front"></div>
+          <div class="idcard-face back"><img src="assets/id_back.jpg" alt="ID Back"></div>
+        </div>
+      </div>
+      <div class="idcard-hint">TAP CARD TO ROTATE</div>
+    </div>
+  </div>
+
+  <div id="photoModal" onclick="closePhotoModal()">
+    <button class="idcard-close" onclick="closePhotoModal()">✕</button>
+    <img src="assets/profile.png" alt="Agent" id="photoModalImg">
+  </div>
+
+  <div id="rankInfoModal" class="infoModal">
+    <div class="infoModal-box panel">
+      <button class="idcard-close" onclick="closeRankInfo()">✕</button>
+      <div id="rankInfoBody"></div>
+    </div>
+  </div>
+
+  <div id="dayDetailModal" class="infoModal">
+    <div class="infoModal-box panel" style="text-align:left;">
+      <button class="idcard-close" onclick="closeDayDetail()">✕</button>
+      <div id="dayDetailBody"></div>
+    </div>
+  </div>
+
+  <div class="shell">
+    <div class="sidebar" id="sidebar">
+      <div class="navgroup-label">COMMAND</div>
+      <button class="navbtn" data-sec="home" onclick="go('home')"><span class="ic">⌂</span>Home</button>
+      <button class="navbtn" data-sec="dashboard" onclick="go('dashboard')"><span class="ic">◈</span>Command Dashboard</button>
+      <button class="navbtn" data-sec="profile" onclick="go('profile')"><span class="ic">☰</span>Agent Profile</button>
+      <button class="navbtn" data-sec="mission" onclick="go('mission')"><span class="ic">⚑</span>Mission</button>
+
+      <div class="navgroup-label">OPERATIONS</div>
+      <button class="navbtn" data-sec="streaks" onclick="go('streaks')"><span class="ic">🔥</span>Streak Center</button>
+      <button class="navbtn" data-sec="daily" onclick="go('daily')"><span class="ic">☑</span>Daily Operations</button>
+      <button class="navbtn" data-sec="trackers" onclick="go('trackers')"><span class="ic">📈</span>Tracker Division</button>
+
+      <div class="navgroup-label">PROGRESSION</div>
+      <button class="navbtn" data-sec="rank" onclick="go('rank')"><span class="ic">★</span>Rank System</button>
+      <button class="navbtn" data-sec="medals" onclick="go('medals')"><span class="ic">🎖</span>Medals &amp; Awards</button>
+      <button class="navbtn" data-sec="badges" onclick="go('badges')"><span class="ic">◉</span>Badge System</button>
+
+      <div class="navgroup-label">INTELLIGENCE</div>
+      <button class="navbtn" data-sec="rulebook" onclick="go('rulebook')"><span class="ic">§</span>Rule Book</button>
+      <button class="navbtn" data-sec="archives" onclick="go('archives')"><span class="ic">🗄</span>History &amp; Archives</button>
+    </div>
+
+    <div class="main" id="mainContent">
+      <!-- sections injected by JS -->
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
