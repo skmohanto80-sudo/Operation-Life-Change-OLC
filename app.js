@@ -364,7 +364,11 @@ function renderTopbar(){
 function tickClock(){
   const el = document.getElementById('clockPill');
   if(el) el.textContent = new Date().toLocaleTimeString();
+  const dEl = document.getElementById('datePill');
+  if(dEl) dEl.textContent = new Date().toLocaleDateString(undefined,{day:'2-digit',month:'short',year:'numeric'});
 }
+function openRKModal(){ document.getElementById('rkModal').style.display = 'flex'; }
+function closeRKModal(){ document.getElementById('rkModal').style.display = 'none'; }
 
 function renderSection(){
   const map = { home:secHome, dashboard:secDashboard, profile:secProfile, mission:secMission,
@@ -406,7 +410,7 @@ function secHome(){
     <h2>MISSION OVERVIEW</h2>
     <div class="sub">${fmtDateLong(t)}</div>
   </div>
-  <img src="${RADHA_KRISHNA_SRC}" alt="Radha Krishna" style="float:right; width:150px; max-width:35vw; border-radius:12px; border:1px solid var(--border-strong); box-shadow:0 8px 24px rgba(0,0,0,.4); margin:-52px 0 14px 14px;">
+  <img src="${RADHA_KRISHNA_SRC}" alt="Radha Krishna" onclick="openRKModal()" style="float:right; width:230px; max-width:48vw; border-radius:14px; border:1px solid var(--border-strong); box-shadow:0 10px 30px rgba(0,0,0,.45); margin:-60px 0 14px 16px; cursor:pointer;">
 
   <div class="grid c3" style="align-items:stretch;">
     <div class="panel" style="text-align:center;">
@@ -1345,10 +1349,55 @@ function runBootAndApp(){
   }, 2600);
 }
 
+/* ========================================================
+   PWA — "Install App" support
+======================================================== */
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  const btn = document.getElementById('installBtn');
+  if(btn) btn.style.display = '';
+});
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  const btn = document.getElementById('installBtn');
+  if(btn) btn.style.display = 'none';
+});
+function isIOS(){ return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream; }
+function isStandalone(){ return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone===true; }
+async function doInstallApp(){
+  if(deferredInstallPrompt){
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    document.getElementById('installBtn').style.display = 'none';
+    return;
+  }
+  if(isIOS()){
+    alert('To install OLC on iPhone/iPad:\n\n1. Tap the Share icon (square with an arrow) in Safari\n2. Scroll down and tap "Add to Home Screen"\n3. Tap "Add"\n\nOLC will then open full-screen from your home screen like a real app.');
+    return;
+  }
+  alert('Your browser doesn\'t support one-tap install here. Look for "Add to Home Screen" or "Install App" in your browser\'s menu (usually the ⋮ or share icon).');
+}
+function registerServiceWorker(){
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  }
+}
+function initInstallButtonVisibility(){
+  const btn = document.getElementById('installBtn');
+  if(!btn) return;
+  if(isStandalone()){ btn.style.display = 'none'; return; }
+  if(isIOS()){ btn.style.display = ''; } // iOS never fires beforeinstallprompt, so show our manual-instructions button
+}
+
 async function init(){
   tickClock(); setInterval(tickClock, 1000);
   setInterval(()=>{ if(state) { rollover(); renderTopbar(); } }, 30000);
   document.getElementById('boot').style.display='none';
+  registerServiceWorker();
+  initInstallButtonVisibility();
   showAuthGate();
 }
 init();

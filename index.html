@@ -11,6 +11,9 @@
 <meta name="apple-mobile-web-app-title" content="OLC">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0b0714">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" sizes="192x192" href="assets/icon-192.png">
+<link rel="icon" sizes="512x512" href="assets/icon-512.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Great+Vibes&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
@@ -79,7 +82,8 @@
       <div class="tt">OPERATION LIFE CHANGE<small>DISCIPLINE BEFORE MOTIVATION</small></div>
     </div>
     <div class="spacer"></div>
-    <div class="hud-pill"><span class="dot"></span><span id="clockPill" class="mono">--:--:--</span></div>
+    <div class="hud-pill"><span class="dot"></span><span id="datePill" class="mono">-- --- ----</span></div>
+    <div class="hud-pill"><span id="clockPill" class="mono">--:--:--</span></div>
     <div class="hud-pill">RANK <b id="rankPillTxt">—</b></div>
     <div class="hud-pill">DSS <b id="dssPillTxt">0</b>/100</div>
     <div class="hud-pill">XP <b id="xpPillTxt">0</b></div>
@@ -87,10 +91,45 @@
       <button id="themeBtnDark" onclick="setTheme('dark')" title="Dark mode">🌙</button>
       <button id="themeBtnLight" onclick="setTheme('light')" title="Light mode">☀️</button>
     </div>
+    <button class="btn cyan sm" id="installBtn" onclick="doInstallApp()" style="display:none;" title="Install as an app">⬇ Install App</button>
     <div class="avatarBtn" onclick="go('profile')" title="Agent Profile">
       <img src="assets/profile.png" alt="Agent">
     </div>
     <button class="btn ghost sm" onclick="lockApp()" title="Switch / Lock">🔒</button>
+  </div>
+
+  <div id="rkModal" class="infoModal" onclick="if(event.target===this) closeRKModal()">
+    <div class="infoModal-box rk-modal-box">
+      <button class="idcard-close" onclick="closeRKModal()">✕</button>
+      <div class="rk-wrap" style="margin-bottom:10px;">
+        <svg class="rk-flower" viewBox="0 0 60 60" width="30" height="30">
+          <g transform="translate(30,30)">
+            <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1"/>
+            <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(72)"/>
+            <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(144)"/>
+            <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(216)"/>
+            <ellipse cx="0" cy="-14" rx="7" ry="13" fill="#fff" stroke="#e8d9f5" stroke-width="1" transform="rotate(288)"/>
+            <circle cx="0" cy="0" r="5.5" fill="#ffd23f"/>
+          </g>
+        </svg>
+        <span class="rk-text" style="font-size:26px;">Radha</span>
+        <span class="rk-text" style="font-size:26px;">Krishna</span>
+        <svg class="rk-feather" viewBox="0 0 40 100" width="22" height="56">
+          <path d="M20 96 Q17 60 20 30" stroke="#4a7c59" stroke-width="2" fill="none"/>
+          <ellipse cx="20" cy="20" rx="15" ry="22" fill="#1c5a52"/>
+          <ellipse cx="20" cy="20" rx="10.5" ry="16" fill="#2f8f7a"/>
+          <ellipse cx="20" cy="20" rx="6.5" ry="10" fill="#3fb8a8"/>
+          <ellipse cx="20" cy="20" rx="3" ry="5" fill="#12312e"/>
+        </svg>
+      </div>
+      <div class="rk-glow-ring">
+        <img src="assets/radha_krishna.jpg" alt="Radha Krishna">
+      </div>
+      <div class="rk-incense">
+        <span></span><span></span><span></span>
+      </div>
+      <div class="stat-label" style="text-align:center; margin-top:14px;">"Joy Sree Radha-Krishna!"</div>
+    </div>
   </div>
 
   <div id="idCardModal">

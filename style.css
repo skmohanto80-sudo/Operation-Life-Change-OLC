@@ -150,6 +150,31 @@ h1,h2,h3,.disp{ font-family:'Orbitron', sans-serif; letter-spacing:0.04em; }
 .infoModal{ position:fixed; inset:0; z-index:9500; display:none; align-items:center; justify-content:center; background:rgba(3,2,8,0.85); backdrop-filter:blur(6px); padding:20px; }
 .infoModal-box{ position:relative; width:min(420px,92vw); max-height:82vh; overflow-y:auto; }
 .infoModal-box .idcard-close{ position:absolute; top:-10px; right:-10px; background:var(--panel-2); border:1px solid var(--border-strong); color:var(--white); width:32px; height:32px; border-radius:50%; cursor:pointer; font-size:14px; }
+
+/* ===== RADHA KRISHNA DIVINE MODAL ===== */
+.rk-modal-box{ text-align:center; width:min(440px,92vw); }
+.rk-glow-ring{ position:relative; width:min(320px,80vw); margin:0 auto; border-radius:16px; overflow:hidden; }
+.rk-glow-ring::before{
+  content:''; position:absolute; inset:-6px; border-radius:20px; z-index:-1;
+  background:conic-gradient(from 0deg, #ffd23f, #d779f1, #01c4c4, #ffd23f);
+  animation:rkRingSpin 6s linear infinite; filter:blur(10px); opacity:.7;
+}
+.rk-glow-ring img{ width:100%; display:block; border-radius:14px; position:relative; z-index:1; }
+@keyframes rkRingSpin{ to{ transform:rotate(360deg); } }
+.rk-incense{ position:relative; height:30px; margin-top:6px; }
+.rk-incense span{
+  position:absolute; bottom:0; left:50%; width:3px; height:3px; border-radius:50%;
+  background:rgba(255,210,63,.8); box-shadow:0 0 6px rgba(255,210,63,.8);
+  animation:rkRise 2.6s ease-in infinite;
+}
+.rk-incense span:nth-child(2){ left:44%; animation-delay:.7s; }
+.rk-incense span:nth-child(3){ left:56%; animation-delay:1.4s; }
+@keyframes rkRise{
+  0%{ transform:translateY(0) translateX(0) scale(1); opacity:0; }
+  15%{ opacity:.9; }
+  100%{ transform:translateY(-70px) translateX(14px) scale(.2); opacity:0; }
+}
+
 .idcard-thumb{ cursor:pointer; border-radius:12px; overflow:hidden; border:1px solid var(--border-strong); box-shadow:0 8px 24px rgba(0,0,0,.4); transition:.2s; }
 .idcard-thumb:hover{ transform:translateY(-3px); box-shadow:0 12px 30px rgba(215,121,241,.3); }
 .idcard-thumb img{ width:100%; display:block; }
