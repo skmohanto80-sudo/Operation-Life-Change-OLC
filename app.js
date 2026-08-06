@@ -54,7 +54,8 @@ const RATING_CATS = [
 
 const DEFAULT_STATE = {
   // (account credentials now live in a separate multi-account registry, not here)
-  profile:{ name:'', codename:'', codeno:'', age:'', cls:'', startDate: todayStr() },
+  profile:{ name:'', codename:'', codeno:'', age:'', cls:'', startDate: todayStr(), photo:null },
+  idcard:{ front:null, back:null },
   mission:{
     statement:'',
     vision:'',
@@ -97,6 +98,56 @@ function daysBetween(a,b){ return Math.round((new Date(b+'T00:00:00') - new Date
 function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
 function esc(s){ return (s||'').toString().replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function uid(p){ return (p||'id')+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+
+/* ---------- user-uploaded photo / ID card ---------- */
+function currentProfilePhoto(){ return (state && state.profile.photo) || PROFILE_IMG_SRC; }
+function currentIdFront(){ return (state && state.idcard && state.idcard.front) || ID_FRONT_SRC; }
+function currentIdBack(){ return (state && state.idcard && state.idcard.back) || ID_BACK_SRC; }
+function syncProfileImagesToDOM(){
+  const av = document.getElementById('topbarAvatarImg'); if(av) av.src = currentProfilePhoto();
+  const pm = document.getElementById('photoModalImg'); if(pm) pm.src = currentProfilePhoto();
+  const idf = document.getElementById('idCardFrontImg'); if(idf) idf.src = currentIdFront();
+  const idb = document.getElementById('idCardBackImg'); if(idb) idb.src = currentIdBack();
+}
+function fileToCompressedDataURL(file, maxW, quality){
+  return new Promise((resolve, reject)=>{
+    if(!file) return reject('no file');
+    const reader = new FileReader();
+    reader.onload = (e)=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const scale = Math.min(1, maxW/img.width);
+        const w = Math.max(1, Math.round(img.width*scale));
+        const h = Math.max(1, Math.round(img.height*scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+async function uploadProfilePhoto(input){
+  const file = input.files && input.files[0]; if(!file) return;
+  try{
+    const dataUrl = await fileToCompressedDataURL(file, 400, 0.85);
+    state.profile.photo = dataUrl;
+    saveState(); syncProfileImagesToDOM(); renderSection();
+  }catch(e){ alert('Could not read that image — try a different file.'); }
+}
+async function uploadIdCardFace(input, face){
+  const file = input.files && input.files[0]; if(!file) return;
+  try{
+    const dataUrl = await fileToCompressedDataURL(file, 700, 0.85);
+    if(!state.idcard) state.idcard = { front:null, back:null };
+    state.idcard[face] = dataUrl;
+    saveState(); syncProfileImagesToDOM(); renderSection();
+  }catch(e){ alert('Could not read that image — try a different file.'); }
+}
 
 function ensureDay(date){
   if(!state.dailyLogs[date]){
@@ -543,8 +594,11 @@ function secProfile(){
   <div class="pagehead"><h2>AGENT PROFILE</h2><div class="sub">CLASSIFIED — COMMAND EYES ONLY</div></div>
   <div class="grid c2">
     <div class="panel" style="text-align:center;">
-      <img src="${PROFILE_IMG_SRC}" alt="Agent" onclick="openPhotoModal()" style="width:150px; height:150px; object-fit:cover; border-radius:50%; border:3px solid var(--border-strong); box-shadow:0 0 24px rgba(215,121,241,.4); cursor:pointer;">
+      <img src="${currentProfilePhoto()}" alt="Agent" onclick="openPhotoModal()" style="width:150px; height:150px; object-fit:cover; border-radius:50%; border:3px solid var(--border-strong); box-shadow:0 0 24px rgba(215,121,241,.4); cursor:pointer;">
       <div class="stat-label" style="margin-top:6px;">TAP PHOTO TO ENLARGE</div>
+      <div style="margin-top:10px;">
+        <label class="btn ghost sm" style="cursor:pointer;">Upload Profile Photo<input type="file" accept="image/*" style="display:none;" onchange="uploadProfilePhoto(this)"></label>
+      </div>
       <h3 style="justify-content:center; margin-top:16px;"><span class="ic">☰</span>AGENT INFORMATION</h3>
       <div class="grid c2" style="text-align:left;">
         <div class="field"><label class="f">Agent Name</label><input type="text" id="pf_name" value="${esc(p.name)}"></div>
@@ -568,9 +622,13 @@ function secProfile(){
       <div style="margin-top:20px;">
         <div class="eyebrow" style="margin-bottom:10px;">AGENT ID CARD</div>
         <div class="idcard-thumb" style="max-width:220px; margin:0 auto;" onclick="openIdCard()">
-          <img src="${ID_FRONT_SRC}" alt="ID Card">
+          <img src="${currentIdFront()}" alt="ID Card">
         </div>
         <div class="stat-label" style="margin-top:8px;">TAP TO VIEW &amp; ROTATE</div>
+        <div style="display:flex; gap:8px; justify-content:center; margin-top:10px; flex-wrap:wrap;">
+          <label class="btn ghost sm" style="cursor:pointer;">Upload Front<input type="file" accept="image/*" style="display:none;" onchange="uploadIdCardFace(this,'front')"></label>
+          <label class="btn ghost sm" style="cursor:pointer;">Upload Back<input type="file" accept="image/*" style="display:none;" onchange="uploadIdCardFace(this,'back')"></label>
+        </div>
       </div>
     </div>
   </div>
@@ -1258,27 +1316,65 @@ async function apiSaveState(accountId, stateObj){
   }catch(e){ /* offline — local copy already saved */ }
 }
 
+/* Reconciles a local account record with the backend's canonical account id.
+   Prevents the "I made this ID locally before the backend existed" bug,
+   where a device could otherwise end up with two disconnected copies of
+   the same account. Whatever the backend calls this account IS the account
+   — a pre-existing local-only copy gets migrated onto that id. */
+function reconcileLocalAccount(codename, codeid, canonicalId){
+  const accounts = getAccounts();
+  let acc = accounts.find(a => a.codename===codename && a.codeid===codeid);
+  if(acc && acc.id !== canonicalId){
+    // Migrate any locally-cached state from the old id to the canonical id.
+    try{
+      const oldRaw = localStorage.getItem(stateKeyFor(acc.id));
+      if(oldRaw && !localStorage.getItem(stateKeyFor(canonicalId))){
+        localStorage.setItem(stateKeyFor(canonicalId), oldRaw);
+      }
+      localStorage.removeItem(stateKeyFor(acc.id));
+    }catch(e){}
+    acc.id = canonicalId;
+    saveAccounts(accounts);
+  } else if(!acc){
+    acc = { id: canonicalId, codename, codeid };
+    accounts.push(acc);
+    saveAccounts(accounts);
+  }
+  return acc;
+}
+
 async function doCreateID(){
   const codename = document.getElementById('ac_codename').value.trim();
   const codeid = document.getElementById('ac_codeid').value.trim();
   const err = document.getElementById('authError');
   if(!codename || !codeid){ err.textContent = 'Enter both a Codename and a Code ID.'; return; }
 
-  // Try the backend first (if configured) so the same ID works across devices.
+  // Try the backend first (if configured) so the same ID works across devices,
+  // exactly like adding a Gmail account: it either finds your existing account
+  // or creates a new one on the server, and the backend's id is always the
+  // real, canonical one.
   const remote = await apiSignup(codename, codeid);
-  const accounts = getAccounts();
-  let acc = findAccount(codename, codeid);
 
   if(remote){
-    if(!acc){ acc = { id: remote.accountId, codename, codeid }; accounts.push(acc); saveAccounts(accounts); }
+    const acc = reconcileLocalAccount(codename, codeid, remote.accountId);
     activeAccountId = acc.id;
-    if(remote.state){ state = Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_STATE)), remote.state); localStorage.setItem(stateKeyFor(acc.id), JSON.stringify(state)); }
-    else { await loadStateFor(acc.id); state.profile.codename = codename; saveState(); }
+    if(remote.state){
+      state = Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_STATE)), remote.state);
+      localStorage.setItem(stateKeyFor(acc.id), JSON.stringify(state));
+    } else {
+      // No server copy yet — use whatever's cached locally (migrated above) or a fresh default.
+      await loadStateFor(acc.id);
+      state.profile.codename = state.profile.codename || codename;
+      saveState();
+    }
     sessionUnlocked = true; enterApp(); return;
   }
 
+  // No backend configured / unreachable — fall back to local-only accounts.
+  let acc = findAccount(codename, codeid);
   if(acc){ await loadStateFor(acc.id); sessionUnlocked = true; enterApp(); return; }
 
+  const accounts = getAccounts();
   acc = { id: uid('acct'), codename, codeid };
   accounts.push(acc);
   saveAccounts(accounts);
@@ -1295,9 +1391,7 @@ async function doLogin(){
 
   const remote = await apiLogin(codename, codeid);
   if(remote){
-    const accounts = getAccounts();
-    let acc = findAccount(codename, codeid);
-    if(!acc){ acc = { id: remote.accountId, codename, codeid }; accounts.push(acc); saveAccounts(accounts); }
+    const acc = reconcileLocalAccount(codename, codeid, remote.accountId);
     activeAccountId = acc.id;
     state = remote.state ? Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_STATE)), remote.state) : JSON.parse(JSON.stringify(DEFAULT_STATE));
     localStorage.setItem(stateKeyFor(acc.id), JSON.stringify(state));
@@ -1305,7 +1399,7 @@ async function doLogin(){
   }
 
   const acc = findAccount(codename, codeid);
-  if(!acc){ err.textContent = 'No matching ID found on this device. Use Create ID if this is new.'; return; }
+  if(!acc){ err.textContent = 'No matching ID found on this device, and the backend is unreachable right now. Check your connection, or use Create ID if this is genuinely new.'; return; }
   await loadStateFor(acc.id);
   sessionUnlocked = true;
   enterApp();
@@ -1337,6 +1431,7 @@ function enterApp(){
 function runBootAndApp(){
   rollover();
   setTheme(state.settings.theme || 'dark');
+  syncProfileImagesToDOM();
   document.querySelectorAll('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.sec==='home'));
   renderAll();
   document.getElementById('boot').style.display='flex';

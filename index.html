@@ -93,7 +93,7 @@
     </div>
     <button class="btn cyan sm" id="installBtn" onclick="doInstallApp()" style="display:none;" title="Install as an app">⬇ Install App</button>
     <div class="avatarBtn" onclick="go('profile')" title="Agent Profile">
-      <img src="assets/profile.png" alt="Agent">
+      <img src="assets/profile.png" alt="Agent" id="topbarAvatarImg">
     </div>
     <button class="btn ghost sm" onclick="lockApp()" title="Switch / Lock">🔒</button>
   </div>
@@ -137,8 +137,8 @@
     <div>
       <div class="idcard-scene">
         <div class="idcard-3d" id="idCard3d" onclick="flipIdCard()">
-          <div class="idcard-face front"><img src="assets/id_front.jpg" alt="ID Front"></div>
-          <div class="idcard-face back"><img src="assets/id_back.jpg" alt="ID Back"></div>
+          <div class="idcard-face front"><img src="assets/id_front.jpg" alt="ID Front" id="idCardFrontImg"></div>
+          <div class="idcard-face back"><img src="assets/id_back.jpg" alt="ID Back" id="idCardBackImg"></div>
         </div>
       </div>
       <div class="idcard-hint">TAP CARD TO ROTATE</div>
