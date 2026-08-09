@@ -7,7 +7,9 @@ const PROFILE_IMG_SRC = 'assets/profile.png';
 const ID_FRONT_SRC = 'assets/id_front.jpg';
 const ID_BACK_SRC = 'assets/id_back.jpg';
 const RADHA_KRISHNA_SRC = 'assets/radha_krishna.jpg';
-const RULEBOOK_PAGES = Array.from({length:23}, (_,i) => `assets/rulebook/page-${String(i+1).padStart(2,'0')}.jpg`);
+const DEFAULT_RULEBOOK_PAGES = Array.from({length:23}, (_,i) => `assets/rulebook/page-${String(i+1).padStart(2,'0')}.jpg`);
+function rbPages(){ return (state && state.rulebookPages && state.rulebookPages.length) ? state.rulebookPages : DEFAULT_RULEBOOK_PAGES; }
+function ensureCustomRulebook(){ if(!state.rulebookPages || !state.rulebookPages.length) state.rulebookPages = DEFAULT_RULEBOOK_PAGES.slice(); }
 const RANKS = [
   { name:'AGENT', xp:0 },
   { name:'LANCE NAIK', xp:500 },
@@ -56,6 +58,7 @@ const DEFAULT_STATE = {
   // (account credentials now live in a separate multi-account registry, not here)
   profile:{ name:'', codename:'', codeno:'', age:'', cls:'', startDate: todayStr(), photo:null },
   idcard:{ front:null, back:null },
+  rulebookPages:null, // null = use bundled default pages; array = user's own custom pages
   mission:{
     statement:'',
     vision:'',
@@ -92,6 +95,7 @@ let editingTracker = { name:null, index:null };
 
 function todayStr(d){ const x=d?new Date(d):new Date(); return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0'); }
 function yestOf(dateStr){ const d=new Date(dateStr+'T00:00:00'); d.setDate(d.getDate()-1); return todayStr(d); }
+function tomorrowOf(dateStr){ const d=new Date(dateStr+'T00:00:00'); d.setDate(d.getDate()+1); return todayStr(d); }
 function isYesterday(dateStr, refToday){ if(!dateStr) return false; return dateStr === yestOf(refToday); }
 function fmtDateLong(dateStr){ if(!dateStr) return '—'; const d=new Date(dateStr+'T00:00:00'); return d.toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'}); }
 function daysBetween(a,b){ return Math.round((new Date(b+'T00:00:00') - new Date(a+'T00:00:00'))/86400000); }
@@ -154,14 +158,26 @@ function ensureDay(date){
     state.dailyLogs[date] = {
       items:{}, ratings:{ study:0, exercise:0, spiritual:0, mood:0 },
       wokeOnTime:false, readingDone:false, waterL:0,
-      screen:{ totalMin:0, devices:[], apps:[], purposes:[], awarded:false },
+      screen:{ totalMin:0, devices:[], awarded:false }, // devices: [{id,name,purpose,apps:[{id,name,min}]}]
       planner:{ morning:'', afternoon:'', night:'' },
       eod:{ well:'', failed:'', learned:'', tomorrow:'' },
     };
   }
   const d = state.dailyLogs[date];
   if(!d.ratings) d.ratings = { study:0, exercise:0, spiritual:0, mood:0 };
-  if(!d.screen) d.screen = { totalMin:0, devices:[], apps:[], purposes:[], awarded:false };
+  if(!d.screen) d.screen = { totalMin:0, devices:[], awarded:false };
+  // Migrate any legacy flat {devices:[{name,min}], apps:[...], purposes:[...]} shape
+  // from before apps/purposes lived under each device.
+  if(d.screen.devices && d.screen.devices.some(dv => dv && !Array.isArray(dv.apps))){
+    const oldDevices = d.screen.devices;
+    const oldApps = d.screen.apps || [];
+    const oldPurpose = (d.screen.purposes||[]).join(', ');
+    d.screen.devices = oldDevices.map(dv => ({
+      id: uid('dev'), name: dv.name||'', purpose: oldPurpose,
+      apps: oldApps.map(a => ({ id: uid('app'), name:a.name||'', min:a.min||0 }))
+    }));
+    delete d.screen.apps; delete d.screen.purposes;
+  }
   if(d.readingDone===undefined) d.readingDone=false;
   return d;
 }
@@ -213,7 +229,7 @@ function getRankInfo(xp){
   const pct = next ? clamp(into/span*100,0,100) : 100;
   return { idx, cur, next, into, span, pct, xp };
 }
-function addXP(n){ state.xp = Math.max(0, state.xp + n); }
+function addXP(n){ state.xp = state.xp + n; } // XP can go negative — Fail penalties must actually subtract
 
 /* ---------- streaks ---------- */
 function streakCheck(key, date){
@@ -228,9 +244,13 @@ function streakUncheck(key, date){
   if(s.lastDate !== date) return;
   s.count = s._pc; s.lastDate = s._pd;
 }
+function goalsForDate(date){
+  return state.goals.filter(g => !g.effectiveFrom || g.effectiveFrom <= date);
+}
 function recomputeHabitStreak(date){
   const day = ensureDay(date);
-  const allDone = state.goals.length>0 && state.goals.every(g => goalStatus(day, g.id)==='full');
+  const active = goalsForDate(date);
+  const allDone = active.length>0 && active.every(g => goalStatus(day, g.id)==='full');
   if(allDone) streakCheck('habit', date); else streakUncheck('habit', date);
 }
 
@@ -260,8 +280,10 @@ function setGoalStatus(date, goalId, status){
 function addGoal(){
   const label = document.getElementById('newGoalLabel').value.trim();
   const xp = Number(document.getElementById('newGoalXP').value)||10;
+  const when = document.getElementById('newGoalWhen').value; // 'today' | 'tomorrow'
   if(!label) return;
-  state.goals.push({ id: uid('g'), label, xp });
+  const effectiveFrom = when==='tomorrow' ? tomorrowOf(todayStr()) : null;
+  state.goals.push({ id: uid('g'), label, xp, effectiveFrom });
   saveState(); renderSection();
 }
 function editGoal(id){
@@ -333,9 +355,10 @@ function starsHTML(date, cat, label, icon){
 /* ---------- DSS + life stats ---------- */
 function getDSS(date){
   const day = ensureDay(date);
-  if(!state.goals.length) return 0;
-  const sum = state.goals.reduce((a,g)=>{ const s=goalStatus(day,g.id); return a + (s==='full'?1:s==='half'?0.5:0); },0);
-  return Math.round(sum / state.goals.length * 100);
+  const active = goalsForDate(date);
+  if(!active.length) return 0;
+  const sum = active.reduce((a,g)=>{ const s=goalStatus(day,g.id); return a + (s==='full'?1:s==='half'?0.5:0); },0);
+  return Math.round(sum / active.length * 100);
 }
 function last7Dates(refDate){
   const arr=[]; for(let i=6;i>=0;i--){ const d=new Date(refDate+'T00:00:00'); d.setDate(d.getDate()-i); arr.push(todayStr(d)); } return arr;
@@ -452,7 +475,8 @@ function secHome(){
   const p = state.profile;
   const daysActive = daysBetween(p.startDate || t, t);
   const motto = MOTTOS[new Date().getDate() % MOTTOS.length];
-  const doneCount = state.goals.filter(g=>goalStatus(day,g.id)==='full').length;
+  const todaysGoals = goalsForDate(t);
+  const doneCount = todaysGoals.filter(g=>goalStatus(day,g.id)==='full').length;
 
   return `
   <div class="ticker"><span>⚡ OLC-CCS ONLINE &nbsp;&nbsp;·&nbsp;&nbsp; AGENT: ${esc(p.codename||p.name||'UNNAMED')} &nbsp;&nbsp;·&nbsp;&nbsp; DAY ${daysActive} OF THE MISSION &nbsp;&nbsp;·&nbsp;&nbsp; "${esc(motto)}" &nbsp;&nbsp;·&nbsp;&nbsp; DISCIPLINE BEFORE MOTIVATION &nbsp;&nbsp;·&nbsp;&nbsp;</span></div>
@@ -484,7 +508,7 @@ function secHome(){
     <div class="panel" style="text-align:center; display:flex; flex-direction:column; justify-content:center;">
       <div class="eyebrow">TODAY'S DSS</div>
       <div class="stat-big" style="font-size:52px;">${dss}</div>
-      <div class="stat-label">/ 100 &nbsp;·&nbsp; ${doneCount}/${state.goals.length} GOALS COMPLETE</div>
+      <div class="stat-label">/ 100 &nbsp;·&nbsp; ${doneCount}/${todaysGoals.length} GOALS COMPLETE</div>
       <div class="bar gold" style="margin-top:14px;"><i style="width:${dss}%"></i></div>
     </div>
   </div>
@@ -492,7 +516,7 @@ function secHome(){
   <div class="grid c2" style="margin-top:18px;">
     <div class="panel">
       <h3><span class="ic">☑</span>TODAY'S GOALS</h3>
-      ${state.goals.length? state.goals.map(g=>goalRowHTML(t,g,true)).join('') : '<div class="empty">No goals yet — add some in Daily Operations</div>'}
+      ${todaysGoals.length? todaysGoals.map(g=>goalRowHTML(t,g,true)).join('') : '<div class="empty">No goals yet — add some in Daily Operations</div>'}
       <div style="text-align:right; margin-top:6px;"><button class="btn ghost sm" onclick="go('daily')">Manage in Daily Operations →</button></div>
     </div>
 
@@ -525,7 +549,7 @@ function secDashboard(){
   const p = state.profile;
   const daysActive = daysBetween(p.startDate||t, t);
   const week = last7Dates(t);
-  const weekFull = week.reduce((a,d)=>{ const day=state.dailyLogs[d]; if(!day) return a; return a + state.goals.filter(g=>goalStatus(day,g.id)==='full').length; },0);
+  const weekFull = week.reduce((a,d)=>{ const day=state.dailyLogs[d]; if(!day) return a; return a + goalsForDate(d).filter(g=>goalStatus(day,g.id)==='full').length; },0);
   const bestStreak = Math.max(0, ...Object.values(state.streaks).map(s=>s.count));
   return `
   <div class="pagehead"><h2>COMMAND DASHBOARD</h2><div class="sub">DAILY SUCCESS SCORE ENGINE</div></div>
@@ -573,7 +597,7 @@ function secDashboard(){
 
   <div class="panel" style="margin-top:16px;">
     <h3><span class="ic">⚡</span>QUICK LOG — TODAY'S GOALS</h3>
-    ${state.goals.length ? state.goals.map(g=>goalRowHTML(t,g,true)).join('') : '<div class="empty">No goals yet</div>'}
+    ${goalsForDate(t).length ? goalsForDate(t).map(g=>goalRowHTML(t,g,true)).join('') : '<div class="empty">No goals yet</div>'}
   </div>
 
   <div class="panel" style="margin-top:16px;">
@@ -725,18 +749,34 @@ function secStreaks(){
 function secDaily(){
   const t = todayStr();
   const day = ensureDay(t);
+  const todaysGoals = goalsForDate(t);
+  const scheduledGoals = state.goals.filter(g => g.effectiveFrom && g.effectiveFrom > t);
   return `
   <div class="pagehead"><h2>DAILY OPERATIONS</h2><div class="sub">${fmtDateLong(t)}</div></div>
 
   <div class="grid c2">
     <div class="panel">
       <h3><span class="ic">☑</span>DAILY GOALS <span style="font-weight:400; color:var(--dim); font-size:11px;">(Full = full XP · Half = half XP · Fail = −half XP)</span></h3>
-      ${state.goals.length? state.goals.map(g=>goalRowHTML(t,g,false)).join('') : '<div class="empty">No goals yet — add your first one below</div>'}
-      <div class="grid c2" style="margin-top:12px;">
+      ${todaysGoals.length? todaysGoals.map(g=>goalRowHTML(t,g,false)).join('') : '<div class="empty">No goals yet — add your first one below</div>'}
+      <div class="grid c3" style="margin-top:12px;">
         <div class="field"><label class="f">New Goal Name</label><input type="text" id="newGoalLabel" placeholder="e.g. Meditate"></div>
         <div class="field"><label class="f">XP Value</label><input type="number" id="newGoalXP" value="10"></div>
+        <div class="field"><label class="f">Starts</label><select id="newGoalWhen"><option value="today">Today</option><option value="tomorrow">Tomorrow</option></select></div>
       </div>
       <button class="btn sm" onclick="addGoal()">+ Add Goal</button>
+      <div class="stat-label" style="margin-top:6px;">Out of time to plan tomorrow? Set "Starts: Tomorrow" now — it'll sit quietly until then and won't affect today's goals or XP.</div>
+
+      ${scheduledGoals.length ? `
+      <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+        <div class="eyebrow" style="margin-bottom:8px;">SCHEDULED — NOT ACTIVE YET</div>
+        ${scheduledGoals.map(g=>`
+          <div class="checklist-item">
+            <div class="txt">${esc(g.label)}</div>
+            <div class="xp">+${g.xp} XP · from ${g.effectiveFrom}</div>
+            <button class="btn ghost sm" onclick="editGoal('${g.id}')" title="Edit">✎</button>
+            <button class="btn ghost sm" onclick="deleteGoal('${g.id}')" title="Delete">🗑</button>
+          </div>`).join('')}
+      </div>` : ''}
 
       <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
         <div class="checklist-item ${day.wokeOnTime?'done':''}" onclick="toggleWokeOnTime('${t}');">
@@ -852,24 +892,32 @@ function secTrackers(){
 
     <div class="panel">
       <h3><span class="ic">📱</span>SCREEN TIME TRACKER</h3>
-      <div class="field"><label class="f">Total Duration (min)</label><input type="number" id="scr_total" value="${screen.totalMin}"></div>
+      <div class="grid c2">
+        <div class="field"><label class="f">Total Duration (min)</label><input type="number" id="scr_total" value="${screen.totalMin}" onchange="updateScreenTotal(this.value)"></div>
+        <div class="field"><label class="f">Daily Limit (min)</label><input type="number" id="scr_limit" value="${state.settings.screenLimit}" onchange="updateScreenLimit(this.value)"></div>
+      </div>
       <div class="bar" style="margin:10px 0;"><i style="width:${Math.min(screenPct,100)}%; background:${screen.totalMin>state.settings.screenLimit?'linear-gradient(90deg,#8a1030,var(--danger))':'linear-gradient(90deg,var(--violet),var(--lavender))'}"></i></div>
-      <div class="field"><label class="f">Daily Limit (min)</label><input type="number" id="scr_limit" value="${state.settings.screenLimit}"></div>
+      <div class="stat-label">${screen.totalMin} / ${state.settings.screenLimit} MIN — ${screen.totalMin<=state.settings.screenLimit && screen.totalMin>0 ? 'WITHIN LIMIT ✓' : screen.totalMin===0 ? 'NOT LOGGED' : 'OVER LIMIT ✗'}</div>
 
-      <label class="f" style="margin-top:10px;">Devices (name + minutes)</label>
-      ${screen.devices.map((d,i)=>`<div style="display:flex; gap:6px; margin-bottom:6px;"><input type="text" value="${esc(d.name)}" onchange="updateScreenSub('devices',${i},'name',this.value)" placeholder="Device"><input type="number" style="width:90px;" value="${d.min}" onchange="updateScreenSub('devices',${i},'min',this.value)"><button class="btn ghost sm" onclick="removeScreenSub('devices',${i})">✕</button></div>`).join('')}
-      <button class="btn ghost sm" onclick="addScreenSub('devices')">+ Add Device</button>
+      <label class="f" style="margin-top:14px;">Devices</label>
+      ${screen.devices.map((dv,di)=>`
+        <div style="border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:10px; background:rgba(255,255,255,.02);">
+          <div style="display:flex; gap:6px; margin-bottom:6px;">
+            <input type="text" value="${esc(dv.name)}" onchange="updateScreenDevice(${di},'name',this.value)" placeholder="Device name (e.g. Phone)">
+            <input type="text" value="${esc(dv.purpose||'')}" onchange="updateScreenDevice(${di},'purpose',this.value)" placeholder="Purpose (e.g. Study, Chat)">
+            <button class="btn ghost sm" onclick="removeScreenDevice(${di})">✕</button>
+          </div>
+          <label class="f" style="margin-top:6px;">Apps on this device</label>
+          ${dv.apps.map((a,ai)=>`<div style="display:flex; gap:6px; margin-bottom:6px;">
+            <input type="text" value="${esc(a.name)}" onchange="updateScreenApp(${di},${ai},'name',this.value)" placeholder="App / Software">
+            <input type="number" style="width:90px;" value="${a.min}" onchange="updateScreenApp(${di},${ai},'min',this.value)" placeholder="min">
+            <button class="btn ghost sm" onclick="removeScreenApp(${di},${ai})">✕</button>
+          </div>`).join('') || '<div class="empty" style="padding:6px;">No apps logged for this device yet</div>'}
+          <button class="btn ghost sm" onclick="addScreenApp(${di})">+ Add App</button>
+        </div>`).join('') || '<div class="empty">No devices logged yet</div>'}
+      <button class="btn ghost sm" onclick="addScreenDevice()">+ Add Device</button>
 
-      <label class="f" style="margin-top:12px;">Apps / Software (name + minutes)</label>
-      ${screen.apps.map((d,i)=>`<div style="display:flex; gap:6px; margin-bottom:6px;"><input type="text" value="${esc(d.name)}" onchange="updateScreenSub('apps',${i},'name',this.value)" placeholder="App"><input type="number" style="width:90px;" value="${d.min}" onchange="updateScreenSub('apps',${i},'min',this.value)"><button class="btn ghost sm" onclick="removeScreenSub('apps',${i})">✕</button></div>`).join('')}
-      <button class="btn ghost sm" onclick="addScreenSub('apps')">+ Add App</button>
-
-      <label class="f" style="margin-top:12px;">Purpose(s)</label>
-      ${screen.purposes.map((p,i)=>`<div style="display:flex; gap:6px; margin-bottom:6px;"><input type="text" value="${esc(p)}" onchange="updateScreenPurpose(${i},this.value)" placeholder="Purpose"><button class="btn ghost sm" onclick="removeScreenPurpose(${i})">✕</button></div>`).join('')}
-      <button class="btn ghost sm" onclick="addScreenPurpose()">+ Add Purpose</button>
-
-      <div class="stat-label" style="margin-top:12px;">${screen.totalMin} / ${state.settings.screenLimit} MIN — ${screen.totalMin<=state.settings.screenLimit && screen.totalMin>0 ? 'WITHIN LIMIT ✓' : screen.totalMin===0 ? 'NOT LOGGED' : 'OVER LIMIT ✗'}</div>
-      <button class="btn sm" style="margin-top:10px;" onclick="saveScreenTime()">Save Screen Time (+10XP if compliant)</button>
+      <button class="btn sm" style="margin-top:14px; display:block;" onclick="saveScreenTime()">Save Screen Time (+10XP if compliant)</button>
     </div>
   </div>
 
@@ -959,13 +1007,15 @@ function addWater(l){ const day=ensureDay(todayStr()); day.waterL = Math.round((
 function resetWater(){ const day=ensureDay(todayStr()); day.waterL=0; saveState(); renderSection(); }
 function setWaterGoal(v){ state.settings.waterGoal = Number(v)||2.5; saveState(); renderSection(); }
 
-/* screen time */
-function addScreenSub(kind){ const day=ensureDay(todayStr()); day.screen[kind].push({name:'',min:0}); saveState(); renderSection(); }
-function removeScreenSub(kind, i){ const day=ensureDay(todayStr()); day.screen[kind].splice(i,1); saveState(); renderSection(); }
-function updateScreenSub(kind, i, field, val){ const day=ensureDay(todayStr()); day.screen[kind][i][field] = field==='min'? (Number(val)||0) : val; saveState(); }
-function addScreenPurpose(){ const day=ensureDay(todayStr()); day.screen.purposes.push(''); saveState(); renderSection(); }
-function removeScreenPurpose(i){ const day=ensureDay(todayStr()); day.screen.purposes.splice(i,1); saveState(); renderSection(); }
-function updateScreenPurpose(i, val){ const day=ensureDay(todayStr()); day.screen.purposes[i]=val; saveState(); }
+/* screen time — apps live nested inside each device */
+function addScreenDevice(){ const day=ensureDay(todayStr()); day.screen.devices.push({ id:uid('dev'), name:'', purpose:'', apps:[] }); saveState(); renderSection(); }
+function removeScreenDevice(i){ const day=ensureDay(todayStr()); day.screen.devices.splice(i,1); saveState(); renderSection(); }
+function updateScreenDevice(i, field, val){ const day=ensureDay(todayStr()); day.screen.devices[i][field] = val; saveState(); }
+function addScreenApp(deviceIdx){ const day=ensureDay(todayStr()); day.screen.devices[deviceIdx].apps.push({ id:uid('app'), name:'', min:0 }); saveState(); renderSection(); }
+function removeScreenApp(deviceIdx, appIdx){ const day=ensureDay(todayStr()); day.screen.devices[deviceIdx].apps.splice(appIdx,1); saveState(); renderSection(); }
+function updateScreenApp(deviceIdx, appIdx, field, val){ const day=ensureDay(todayStr()); day.screen.devices[deviceIdx].apps[appIdx][field] = field==='min' ? (Number(val)||0) : val; saveState(); }
+function updateScreenTotal(v){ const day=ensureDay(todayStr()); day.screen.totalMin = Number(v)||0; saveState(); renderSection(); }
+function updateScreenLimit(v){ state.settings.screenLimit = Number(v)||180; saveState(); renderSection(); }
 function saveScreenTime(){
   const day = ensureDay(todayStr());
   day.screen.totalMin = Number(document.getElementById('scr_total').value)||0;
@@ -1104,16 +1154,23 @@ let fbIndex = 0;
 let fbAnimating = false;
 
 function secRulebook(){
+  const pages = rbPages();
   return `
   <div class="pagehead"><h2>THE RULE BOOK</h2><div class="sub">THE OFFICIAL OPERATING MANUAL OF AGENT SK &amp; OLC — v1.0</div></div>
   <div class="panel flipbook-wrap">
     <div class="flipbook" id="flipbook"></div>
     <div class="fb-controls">
       <button class="fb-navbtn" id="fbPrev" onclick="fbTurn(-1)">‹</button>
-      <div class="fb-pagenum" id="fbPageNum">Page 1 / ${RULEBOOK_PAGES.length}</div>
+      <div class="fb-pagenum" id="fbPageNum">Page 1 / ${pages.length}</div>
       <button class="fb-navbtn" id="fbNext" onclick="fbTurn(1)">›</button>
     </div>
     <div class="idcard-hint" style="margin-top:6px;">CLICK THE ARROWS TO TURN PAGES</div>
+    <div style="display:flex; gap:8px; justify-content:center; margin-top:14px; flex-wrap:wrap;">
+      <label class="btn ghost sm" style="cursor:pointer;">Upload Page<input type="file" accept="image/*" style="display:none;" onchange="uploadRulebookPage(this)"></label>
+      <button class="btn ghost sm" onclick="deleteRulebookPage(fbIndex)">Delete This Page</button>
+      <button class="btn ghost sm" onclick="resetRulebookToDefault()">Reset To Original</button>
+    </div>
+    <div class="stat-label" style="text-align:center; margin-top:8px;">Uploaded pages replace or extend the book — delete originals or add your own, it's yours to edit.</div>
   </div>
   <div class="panel" style="margin-top:16px;">
     <h3><span class="ic">✎</span>ADDITIONAL PERSONAL NOTES</h3>
@@ -1125,22 +1182,26 @@ function secRulebook(){
 function fbRenderBase(){
   const el = document.getElementById('flipbook');
   if(!el) return;
-  el.innerHTML = `<div class="fb-page"><img src="${RULEBOOK_PAGES[fbIndex]}"></div>`;
-  document.getElementById('fbPageNum').textContent = `Page ${fbIndex+1} / ${RULEBOOK_PAGES.length}`;
+  const pages = rbPages();
+  if(fbIndex >= pages.length) fbIndex = Math.max(0, pages.length-1);
+  if(!pages.length){ el.innerHTML = '<div class="empty" style="padding:30px;">No pages — upload one to get started</div>'; return; }
+  el.innerHTML = `<div class="fb-page"><img src="${pages[fbIndex]}"></div>`;
+  document.getElementById('fbPageNum').textContent = `Page ${fbIndex+1} / ${pages.length}`;
   document.getElementById('fbPrev').disabled = fbIndex<=0;
-  document.getElementById('fbNext').disabled = fbIndex>=RULEBOOK_PAGES.length-1;
+  document.getElementById('fbNext').disabled = fbIndex>=pages.length-1;
 }
 function fbTurn(dir){
   if(fbAnimating) return;
+  const pages = rbPages();
   const next = fbIndex + dir;
-  if(next<0 || next>=RULEBOOK_PAGES.length) return;
+  if(next<0 || next>=pages.length) return;
   fbAnimating = true;
   const el = document.getElementById('flipbook');
   const flip = document.createElement('div');
   flip.className = 'fb-flip';
   flip.innerHTML = `
-    <div class="fb-face fb-front"><img src="${RULEBOOK_PAGES[fbIndex]}"></div>
-    <div class="fb-face fb-back"><img src="${RULEBOOK_PAGES[next]}"></div>`;
+    <div class="fb-face fb-front"><img src="${pages[fbIndex]}"></div>
+    <div class="fb-face fb-back"><img src="${pages[next]}"></div>`;
   el.appendChild(flip);
   void flip.offsetWidth;
   flip.classList.add(dir>0 ? 'turning-fwd' : 'turning-back');
@@ -1149,6 +1210,31 @@ function fbTurn(dir){
     fbAnimating = false;
     fbRenderBase();
   }, 680);
+}
+async function uploadRulebookPage(input){
+  const file = input.files && input.files[0]; if(!file) return;
+  try{
+    const dataUrl = await fileToCompressedDataURL(file, 750, 0.72);
+    ensureCustomRulebook();
+    state.rulebookPages.push(dataUrl);
+    fbIndex = state.rulebookPages.length - 1;
+    saveState(); renderSection();
+  }catch(e){ alert('Could not read that image — try a different file.'); }
+}
+function deleteRulebookPage(idx){
+  const pages = rbPages();
+  if(!pages.length) return;
+  if(!confirm('Delete this page from the Rule Book?')) return;
+  ensureCustomRulebook();
+  state.rulebookPages.splice(idx,1);
+  if(fbIndex >= state.rulebookPages.length) fbIndex = Math.max(0, state.rulebookPages.length-1);
+  saveState(); renderSection();
+}
+function resetRulebookToDefault(){
+  if(!confirm('Reset the Rule Book back to the original OLC pages? Any pages you uploaded or deleted will be lost.')) return;
+  state.rulebookPages = null;
+  fbIndex = 0;
+  saveState(); renderSection();
 }
 function saveCustomRules(){ state.ruleBookCustom = document.getElementById('rb_custom').value; saveState(); renderSection(); }
 
@@ -1167,9 +1253,10 @@ function secArchives(){
       <tr><th>Date</th><th>DSS</th><th>Goals</th><th>Woke On Time</th><th>EOD Logged</th></tr>
       ${dates.length ? dates.slice(0,62).map(d=>{
         const day = state.dailyLogs[d];
-        const done = state.goals.filter(g=>goalStatus(day,g.id)==='full').length;
+        const activeGoals = goalsForDate(d);
+        const done = activeGoals.filter(g=>goalStatus(day,g.id)==='full').length;
         const hasEod = day.eod.well || day.eod.failed || day.eod.learned || day.eod.tomorrow;
-        return `<tr style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${state.goals.length}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
+        return `<tr style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${activeGoals.length}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
       }).join('') : '<tr><td colspan="5" class="empty">No history yet — complete your first day</td></tr>'}
     </table>
   </div>
@@ -1245,7 +1332,7 @@ function closeRankInfo(){ document.getElementById('rankInfoModal').style.display
 function openDayDetail(date){
   const day = state.dailyLogs[date];
   if(!day) return;
-  const goalsHtml = state.goals.map(g=>{
+  const goalsHtml = goalsForDate(date).map(g=>{
     const s = goalStatus(day, g.id);
     const eff = goalXPEffect(g, s);
     const lbl = s==='full'?'FULL':s==='half'?'HALF':s==='fail'?'FAIL':'—';
@@ -1483,8 +1570,10 @@ function registerServiceWorker(){
 function initInstallButtonVisibility(){
   const btn = document.getElementById('installBtn');
   if(!btn) return;
-  if(isStandalone()){ btn.style.display = 'none'; return; }
-  if(isIOS()){ btn.style.display = ''; } // iOS never fires beforeinstallprompt, so show our manual-instructions button
+  // Show it any time we're NOT currently running as an installed app — this way,
+  // if the app gets uninstalled later, the button is simply there again next visit,
+  // instead of depending on the browser re-firing beforeinstallprompt.
+  btn.style.display = isStandalone() ? 'none' : '';
 }
 
 async function init(){
