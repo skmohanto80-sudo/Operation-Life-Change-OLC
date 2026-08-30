@@ -91,11 +91,24 @@
       <button id="themeBtnDark" onclick="setTheme('dark')" title="Dark mode">🌙</button>
       <button id="themeBtnLight" onclick="setTheme('light')" title="Light mode">☀️</button>
     </div>
+    <button class="btn ghost sm" onclick="openThemeModal()" title="Color Theme">🎨 Theme</button>
+    <button class="btn ghost sm" id="modeBtn" onclick="toggleMonkMode()" title="Switch focus mode">🧘 Monk Mode</button>
     <button class="btn cyan sm" id="installBtn" onclick="doInstallApp()" style="display:none;" title="Install as an app">⬇ Install App</button>
     <div class="avatarBtn" onclick="go('profile')" title="Agent Profile">
       <img src="assets/profile.png" alt="Agent" id="topbarAvatarImg">
     </div>
     <button class="btn ghost sm" onclick="lockApp()" title="Switch / Lock">🔒</button>
+  </div>
+
+  <div id="themeModal" class="infoModal" onclick="if(event.target===this) closeThemeModal()">
+    <div class="infoModal-box panel">
+      <button class="idcard-close" onclick="closeThemeModal()">✕</button>
+      <h3 style="justify-content:center;"><span class="ic">🎨</span>COLOR THEME</h3>
+      <div class="stat-label" style="text-align:center; margin-bottom:14px;">Dark/Bright is separate — pick a color below, then use 🌙/☀️ for brightness.</div>
+      <div class="grid c3" id="colorSwatches">
+        ${''}
+      </div>
+    </div>
   </div>
 
   <div id="rkModal" class="infoModal" onclick="if(event.target===this) closeRKModal()">
@@ -123,12 +136,15 @@
         </svg>
       </div>
       <div class="rk-glow-ring">
-        <img src="assets/radha_krishna.jpg" alt="Radha Krishna">
+        <img src="assets/radha_krishna.jpg" alt="Radha Krishna" id="rkModalImg">
       </div>
       <div class="rk-incense">
         <span></span><span></span><span></span>
       </div>
       <div class="stat-label" style="text-align:center; margin-top:14px;">"Joy Sree Radha-Krishna!"</div>
+      <div style="text-align:center; margin-top:10px;">
+        <label class="btn ghost sm" style="cursor:pointer;">Upload Your Own Image<input type="file" accept="image/*" style="display:none;" onchange="uploadRKImage(this)"></label>
+      </div>
     </div>
   </div>
 
