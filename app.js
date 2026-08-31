@@ -88,6 +88,7 @@ const DEFAULT_STATE = {
   settings:{ waterGoal:2.5, screenLimit:180, theme:'dark', colorTheme:'violet', mode:'normal' },
   rankOverrides:null, // null = use built-in XP thresholds; else array of 14 custom XP numbers
   customImages:{ radhaKrishna:null }, // null = use bundled default image
+  campaign:{ active:false, name:'OLC MONK MODE', startDate:null, endDate:null },
   ruleBookCustom:'',
 };
 
@@ -100,6 +101,41 @@ let editingTracker = { name:null, index:null };
 function todayStr(d){ const x=d?new Date(d):new Date(); return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0'); }
 function yestOf(dateStr){ const d=new Date(dateStr+'T00:00:00'); d.setDate(d.getDate()-1); return todayStr(d); }
 function tomorrowOf(dateStr){ const d=new Date(dateStr+'T00:00:00'); d.setDate(d.getDate()+1); return todayStr(d); }
+
+/* ---------- Monk Mode Campaign — dates are fully configurable, nothing hard-coded ---------- */
+const CAMPAIGN_PHASES = [
+  { name:'FOUNDATION', from:0, to:0.26, objective:'Build syllabus coverage and identify weaknesses.' },
+  { name:'MASTERY', from:0.26, to:0.60, objective:'Concept mastery, practice, and active recall.' },
+  { name:'EXAM TRAINING', from:0.60, to:0.86, objective:'Timed tests, exam technique, error correction.' },
+  { name:'FINAL ASSAULT', from:0.86, to:1.0, objective:'Final revision, mocks, weak-topic correction.' },
+];
+function campaignInfo(){
+  const c = state.campaign;
+  if(!c || !c.active || !c.startDate || !c.endDate) return null;
+  const totalDays = Math.max(1, daysBetween(c.startDate, c.endDate));
+  const t = todayStr();
+  const elapsed = daysBetween(c.startDate, t);
+  const dayNumber = clamp(elapsed+1, 1, totalDays+1);
+  const daysRemaining = Math.max(0, daysBetween(t, c.endDate));
+  const progressPct = clamp((elapsed/totalDays)*100, 0, 100);
+  const frac = clamp(elapsed/totalDays, 0, 1);
+  const phase = CAMPAIGN_PHASES.find(p => frac>=p.from && frac<p.to) || CAMPAIGN_PHASES[CAMPAIGN_PHASES.length-1];
+  const isOver = t > c.endDate;
+  return { name:c.name, startDate:c.startDate, endDate:c.endDate, totalDays, dayNumber, daysRemaining, progressPct, phase, isOver };
+}
+function saveCampaignSettings(){
+  state.campaign.name = document.getElementById('camp_name').value.trim() || 'OLC MONK MODE';
+  state.campaign.startDate = document.getElementById('camp_start').value || null;
+  state.campaign.endDate = document.getElementById('camp_end').value || null;
+  state.campaign.active = !!(state.campaign.startDate && state.campaign.endDate);
+  saveState(); renderSection();
+}
+function stopCampaign(){
+  if(!confirm('Stop the current campaign? Your history is kept — you can start a new one anytime.')) return;
+  state.campaign.active = false;
+  saveState(); renderSection();
+}
+
 function isYesterday(dateStr, refToday){ if(!dateStr) return false; return dateStr === yestOf(refToday); }
 function fmtDateLong(dateStr){ if(!dateStr) return '—'; const d=new Date(dateStr+'T00:00:00'); return d.toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'}); }
 function daysBetween(a,b){ return Math.round((new Date(b+'T00:00:00') - new Date(a+'T00:00:00'))/86400000); }
@@ -299,9 +335,10 @@ function addGoal(){
   const label = document.getElementById('newGoalLabel').value.trim();
   const xp = Number(document.getElementById('newGoalXP').value)||10;
   const when = document.getElementById('newGoalWhen').value; // 'today' | 'tomorrow'
+  const priority = document.getElementById('newGoalPriority').value; // 'must' | 'should' | 'optional'
   if(!label) return;
   const effectiveFrom = when==='tomorrow' ? tomorrowOf(todayStr()) : null;
-  state.goals.push({ id: uid('g'), label, xp, effectiveFrom });
+  state.goals.push({ id: uid('g'), label, xp, effectiveFrom, priority });
   saveState(); renderSection();
 }
 function editGoal(id){
@@ -310,14 +347,32 @@ function editGoal(id){
   if(newLabel===null) return;
   const newXp = prompt('XP value (full completion):', g.xp);
   if(newXp===null) return;
+  const newPriority = prompt('Priority — type "must", "should", or "optional":', g.priority||'must');
+  if(newPriority===null) return;
   g.label = newLabel.trim()||g.label;
   g.xp = Number(newXp)||g.xp;
+  if(['must','should','optional'].includes(newPriority.trim())) g.priority = newPriority.trim();
   saveState(); renderSection();
 }
 function deleteGoal(id){
   if(!confirm('Remove this goal from your Daily Goals list?')) return;
   state.goals = state.goals.filter(g=>g.id!==id);
   saveState(); renderSection();
+}
+function goalPriorityGroupsHTML(date, goals){
+  const groups = [
+    { key:'must', label:'MUST DO', color:'var(--danger)' },
+    { key:'should', label:'SHOULD DO', color:'var(--gold)' },
+    { key:'optional', label:'IF TIME ALLOWS', color:'var(--cyan)' },
+  ];
+  return groups.map(grp=>{
+    const items = goals.filter(g => (g.priority||'must')===grp.key);
+    if(!items.length) return '';
+    return `<div style="margin-bottom:10px;">
+      <div class="eyebrow" style="color:${grp.color}; margin-bottom:6px;">${grp.label}</div>
+      ${items.map(g=>goalRowHTML(date,g,true)).join('')}
+    </div>`;
+  }).join('') || goals.map(g=>goalRowHTML(date,g,true)).join('');
 }
 function goalRowHTML(date, g, compact){
   const day = ensureDay(date);
@@ -518,11 +573,51 @@ const MOTTOS = [
   "Comfort is the enemy's greatest weapon.",
   "Mission First. No Zero Days. Progress Over Perfection.",
 ];
+function campaignPanelHTML(){
+  const info = campaignInfo();
+  const c = state.campaign;
+  if(!info){
+    return `
+    <div class="panel" style="margin-bottom:16px;">
+      <h3><span class="ic">🎯</span>MONK MODE CAMPAIGN</h3>
+      <p class="stat-label" style="margin-bottom:10px;">No campaign running. Set a start date and target date (e.g. an exam) to get a Day X/Y counter, countdown, and auto phases.</p>
+      <div class="grid c3">
+        <div class="field"><label class="f">Campaign Name</label><input type="text" id="camp_name" value="${esc((c&&c.name)||'OLC MONK MODE')}"></div>
+        <div class="field"><label class="f">Start Date</label><input type="date" id="camp_start" value="${(c&&c.startDate)||todayStr()}"></div>
+        <div class="field"><label class="f">Target / Exam Date</label><input type="date" id="camp_end" value="${(c&&c.endDate)||''}"></div>
+      </div>
+      <button class="btn sm" onclick="saveCampaignSettings()">Start Campaign</button>
+    </div>`;
+  }
+  return `
+  <div class="panel" style="margin-bottom:16px;">
+    <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px;">
+      <h3 style="margin:0;"><span class="ic">🎯</span>${esc(info.name)}</h3>
+      <div class="stat-label">${info.isOver ? 'CAMPAIGN COMPLETE' : `DAY ${info.dayNumber} / ${info.totalDays}`}</div>
+    </div>
+    <div class="bar gold" style="margin:10px 0;"><i style="width:${info.progressPct}%"></i></div>
+    <div class="grid c3">
+      <div><div class="eyebrow">DAYS REMAINING</div><div class="stat-big" style="font-size:24px;">${info.daysRemaining}</div></div>
+      <div><div class="eyebrow">PROGRESS</div><div class="stat-big" style="font-size:24px;">${Math.round(info.progressPct)}%</div></div>
+      <div><div class="eyebrow">CURRENT PHASE</div><div class="stat-big" style="font-size:16px; color:var(--cyan);">${info.phase.name}</div></div>
+    </div>
+    <div class="stat-label" style="margin-top:8px;">${esc(info.phase.objective)}</div>
+    <div style="margin-top:10px;">
+      <button class="btn ghost sm" onclick="document.getElementById('campEditBox').style.display=document.getElementById('campEditBox').style.display==='none'?'':'none';">✎ Edit Campaign</button>
+      <button class="btn ghost sm" onclick="stopCampaign()">Stop Campaign</button>
+    </div>
+    <div id="campEditBox" style="display:none; margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
+      <div class="grid c3">
+        <div class="field"><label class="f">Campaign Name</label><input type="text" id="camp_name" value="${esc(c.name)}"></div>
+        <div class="field"><label class="f">Start Date</label><input type="date" id="camp_start" value="${c.startDate}"></div>
+        <div class="field"><label class="f">Target / Exam Date</label><input type="date" id="camp_end" value="${c.endDate}"></div>
+      </div>
+      <button class="btn sm" onclick="saveCampaignSettings()">Save Changes</button>
+    </div>
+  </div>`;
+}
+
 function secHome(){
-  const t = todayStr();
-  const day = ensureDay(t);
-  const rank = getRankInfo(state.xp);
-  const dss = getDSS(t);
   const p = state.profile;
   const daysActive = daysBetween(p.startDate || t, t);
   const motto = MOTTOS[new Date().getDate() % MOTTOS.length];
@@ -536,6 +631,7 @@ function secHome(){
     <h2>MISSION OVERVIEW</h2>
     <div class="sub">${fmtDateLong(t)}</div>
   </div>
+  ${campaignPanelHTML()}
   <img src="${currentRKImage()}" alt="Radha Krishna" onclick="openRKModal()" style="float:right; width:230px; max-width:48vw; border-radius:14px; border:1px solid var(--border-strong); box-shadow:0 10px 30px rgba(0,0,0,.45); margin:-60px 0 14px 16px; cursor:pointer;">
 
   <div class="grid c3" style="align-items:stretch;">
@@ -567,7 +663,7 @@ function secHome(){
   <div class="grid c2" style="margin-top:18px;">
     <div class="panel">
       <h3><span class="ic">☑</span>TODAY'S GOALS</h3>
-      ${todaysGoals.length? todaysGoals.map(g=>goalRowHTML(t,g,true)).join('') : '<div class="empty">No goals yet — add some in Daily Operations</div>'}
+      ${todaysGoals.length? goalPriorityGroupsHTML(t, todaysGoals) : '<div class="empty">No goals yet — add some in Daily Operations</div>'}
       <div style="text-align:right; margin-top:6px;"><button class="btn ghost sm" onclick="go('daily')">Manage in Daily Operations →</button></div>
     </div>
 
@@ -816,9 +912,10 @@ function secDaily(){
     <div class="panel">
       <h3><span class="ic">☑</span>DAILY GOALS <span style="font-weight:400; color:var(--dim); font-size:11px;">(Full = full XP · Half = half XP · Fail = −half XP)</span></h3>
       ${todaysGoals.length? todaysGoals.map(g=>goalRowHTML(t,g,false)).join('') : '<div class="empty">No goals yet — add your first one below</div>'}
-      <div class="grid c3" style="margin-top:12px;">
+      <div class="grid c4" style="margin-top:12px;">
         <div class="field"><label class="f">New Goal Name</label><input type="text" id="newGoalLabel" placeholder="e.g. Meditate"></div>
         <div class="field"><label class="f">XP Value</label><input type="number" id="newGoalXP" value="10"></div>
+        <div class="field"><label class="f">Priority</label><select id="newGoalPriority"><option value="must">Must Do</option><option value="should">Should Do</option><option value="optional">If Time Allows</option></select></div>
         <div class="field"><label class="f">Starts</label><select id="newGoalWhen"><option value="today">Today</option><option value="tomorrow">Tomorrow</option></select></div>
       </div>
       <button class="btn sm" onclick="addGoal()">+ Add Goal</button>
