@@ -47,6 +47,8 @@ const RANK_INFO = [
 ];
 function starsRow(n){ if(!n) return ''; return '★'.repeat(n) + '☆'.repeat(Math.max(0,5-n)); }
 
+const SUBJECT_OPTIONS = ['Bangla', 'English', 'Mathematics', 'Science', 'BGS'];
+
 const RATING_CATS = [
   { key:'study', label:'STUDY', icon:'📚' },
   { key:'exercise', label:'EXERCISE', icon:'💪' },
@@ -83,7 +85,9 @@ const DEFAULT_STATE = {
   },
   dailyLogs:{},
   trackerLogs:{ weight:[], height:[], exercise:[], study:[], sleep:[] },
-  settings:{ waterGoal:2.5, screenLimit:180, theme:'dark' },
+  settings:{ waterGoal:2.5, screenLimit:180, theme:'dark', colorTheme:'violet', mode:'normal' },
+  rankOverrides:null, // null = use built-in XP thresholds; else array of 14 custom XP numbers
+  customImages:{ radhaKrishna:null }, // null = use bundled default image
   ruleBookCustom:'',
 };
 
@@ -105,6 +109,7 @@ function uid(p){ return (p||'id')+'_'+Date.now().toString(36)+Math.random().toSt
 
 /* ---------- user-uploaded photo / ID card ---------- */
 function currentProfilePhoto(){ return (state && state.profile.photo) || PROFILE_IMG_SRC; }
+function currentRKImage(){ return (state && state.customImages && state.customImages.radhaKrishna) || RADHA_KRISHNA_SRC; }
 function currentIdFront(){ return (state && state.idcard && state.idcard.front) || ID_FRONT_SRC; }
 function currentIdBack(){ return (state && state.idcard && state.idcard.back) || ID_BACK_SRC; }
 function syncProfileImagesToDOM(){
@@ -112,6 +117,16 @@ function syncProfileImagesToDOM(){
   const pm = document.getElementById('photoModalImg'); if(pm) pm.src = currentProfilePhoto();
   const idf = document.getElementById('idCardFrontImg'); if(idf) idf.src = currentIdFront();
   const idb = document.getElementById('idCardBackImg'); if(idb) idb.src = currentIdBack();
+  const rk = document.getElementById('rkModalImg'); if(rk) rk.src = currentRKImage();
+}
+async function uploadRKImage(input){
+  const file = input.files && input.files[0]; if(!file) return;
+  try{
+    const dataUrl = await fileToCompressedDataURL(file, 600, 0.85);
+    if(!state.customImages) state.customImages = { radhaKrishna:null };
+    state.customImages.radhaKrishna = dataUrl;
+    saveState(); syncProfileImagesToDOM(); renderSection();
+  }catch(e){ alert('Could not read that image — try a different file.'); }
 }
 function fileToCompressedDataURL(file, maxW, quality){
   return new Promise((resolve, reject)=>{
@@ -219,11 +234,14 @@ function saveState(){
 }
 
 /* ---------- rank / xp ---------- */
+function rankXP(i){ return (state && state.rankOverrides && state.rankOverrides[i]!=null) ? state.rankOverrides[i] : RANKS[i].xp; }
+function effectiveRanks(){ return RANKS.map((r,i)=>({ name:r.name, xp: rankXP(i) })); }
 function getRankInfo(xp){
+  const ranks = effectiveRanks();
   let idx=0;
-  for(let i=0;i<RANKS.length;i++){ if(xp>=RANKS[i].xp) idx=i; }
-  const cur = RANKS[idx];
-  const next = RANKS[idx+1] || null;
+  for(let i=0;i<ranks.length;i++){ if(xp>=ranks[i].xp) idx=i; }
+  const cur = ranks[idx];
+  const next = ranks[idx+1] || null;
   const span = next ? next.xp - cur.xp : 1;
   const into = xp - cur.xp;
   const pct = next ? clamp(into/span*100,0,100) : 100;
@@ -385,31 +403,64 @@ function getLifeStats(){
 }
 
 /* ---------- medals / badges (auto-derived) ---------- */
+const MEDAL_RIBBONS = {
+  discipline:['#6753b7','#d779f1','#6753b7'],
+  purity:['#ffffff','#01c4c4','#ffffff'],
+  study:['#0a3d62','#01c4c4','#0a3d62'],
+  spiritual:['#8e3fc7','#ffd23f','#8e3fc7'],
+  consistency:['#0a5c36','#3ee08a','#0a5c36'],
+  comeback:['#7a1030','#ff4d6d','#7a1030'],
+  focus:['#ffd23f','#01c4c4','#ffd23f'],
+  leadership:['#6753b7','#d779f1','#6753b7'],
+  selfcontrol:['#a5770a','#ffd23f','#a5770a'],
+  commander:['#ff4d6d','#ffd23f','#01c4c4'],
+};
+const BADGE_RIBBONS = {
+  dss:['#6753b7','#d779f1','#6753b7'],
+  fitness:['#0a5c36','#3ee08a','#0a5c36'],
+  skills:['#0a3d62','#01c4c4','#0a3d62'],
+};
 function getMedals(){
   const totalStudyHrs = state.trackerLogs.study.reduce((a,b)=>a+Number(b.hours||0),0);
   const rank = getRankInfo(state.xp);
-  return [
-    { id:'discipline', name:'Discipline Medal', desc:'30 Days No Discipline Violation', icon:'🛡️', unlocked: state.streaks.habit.count>=30 },
-    { id:'purity', name:'Purity Medal', desc:'30 Days Pure Mind & Body', icon:'💠', unlocked: state.streaks.habit.count>=30 },
-    { id:'study', name:'Study Excellence Medal', desc:'100 study hours logged', icon:'📘', unlocked: totalStudyHrs>=100 },
-    { id:'spiritual', name:'Spiritual Warrior Medal', desc:'30+ Days Daily Spiritual Practice', icon:'🕊️', unlocked: state.streaks.spiritual.count>=30 },
-    { id:'consistency', name:'Consistency Medal', desc:'90 Days Consistency Streak', icon:'🔗', unlocked: state.streaks.habit.count>=90 },
-    { id:'comeback', name:'Comeback Medal', desc:'Overcame a relapse & returned', icon:'🔁', unlocked: state.streaks.habit._pc>0 && state.streaks.habit.count>=7 },
-    { id:'focus', name:'Focus Medal', desc:'50+ hours logged in Study Tracker', icon:'🎯', unlocked: totalStudyHrs>=50 },
-    { id:'leadership', name:'Leadership Medal', desc:'Reach Colonel rank or above', icon:'🧭', unlocked: rank.idx>=8 },
-    { id:'selfcontrol', name:'Self Control Medal', desc:'21-day Habit streak', icon:'🧘', unlocked: state.streaks.habit.count>=21 },
-    { id:'commander', name:'Mission Commander Medal', desc:'Reached Field Marshal', icon:'👑', unlocked: rank.cur.name==='FIELD MARSHAL' },
+  const raw = [
+    { id:'discipline', name:'Discipline Medal', desc:'30 Days No Discipline Violation', current: state.streaks.habit.count, target:30 },
+    { id:'purity', name:'Purity Medal', desc:'30 Days Pure Mind & Body', current: state.streaks.habit.count, target:30 },
+    { id:'study', name:'Study Excellence Medal', desc:'100 study hours logged', current: totalStudyHrs, target:100 },
+    { id:'spiritual', name:'Spiritual Warrior Medal', desc:'30+ Days Daily Spiritual Practice', current: state.streaks.spiritual.count, target:30 },
+    { id:'consistency', name:'Consistency Medal', desc:'90 Days Consistency Streak', current: state.streaks.habit.count, target:90 },
+    { id:'comeback', name:'Comeback Medal', desc:'Overcame a relapse & returned', current: (state.streaks.habit._pc>0 && state.streaks.habit.count>=7)?1:0, target:1 },
+    { id:'focus', name:'Focus Medal', desc:'50+ hours logged in Study Tracker', current: totalStudyHrs, target:50 },
+    { id:'leadership', name:'Leadership Medal', desc:'Reach Colonel rank or above', current: rank.idx, target:8 },
+    { id:'selfcontrol', name:'Self Control Medal', desc:'21-day Habit streak', current: state.streaks.habit.count, target:21 },
+    { id:'commander', name:'Mission Commander Medal', desc:'Reached Field Marshal', current: rank.idx, target:13 },
   ];
+  return raw.map(m => Object.assign(m, { unlocked: m.current>=m.target, ribbon: MEDAL_RIBBONS[m.id] }));
 }
 function getBadges(){
   const totalStudyHrs = state.trackerLogs.study.reduce((a,b)=>a+Number(b.hours||0),0);
-  const stats = getLifeStats();
-  const rank = getRankInfo(state.xp);
-  return [
-    { id:'dss', name:'DSS Badge', desc:'Guardian of Discipline, Spirituality & Study — 30 days Habit streak', icon:'🛡️', unlocked: state.streaks.habit.count>=30 },
-    { id:'fitness', name:'Fitness Badge', desc:'Warrior of Physical & Mental Strength — 30-day Fitness streak', icon:'💪', unlocked: state.streaks.fitness.count>=30 },
-    { id:'skills', name:'Skills Badge', desc:'Expert in Skills & Knowledge — 100 study hours', icon:'🧠', unlocked: totalStudyHrs>=100 },
+  const raw = [
+    { id:'dss', name:'DSS Badge', desc:'Guardian of Discipline, Spirituality & Study — 30 days Habit streak', current: state.streaks.habit.count, target:30 },
+    { id:'fitness', name:'Fitness Badge', desc:'Warrior of Physical & Mental Strength — 30-day Fitness streak', current: state.streaks.fitness.count, target:30 },
+    { id:'skills', name:'Skills Badge', desc:'Expert in Skills & Knowledge — 100 study hours', current: totalStudyHrs, target:100 },
   ];
+  return raw.map(b => Object.assign(b, { unlocked: b.current>=b.target, ribbon: BADGE_RIBBONS[b.id] }));
+}
+/* Real army-style medal: ribbon strip + hanging medallion. ribbonOnly=true renders just the ribbon bar chip. */
+function medalSVG(colors, unlocked, ribbonOnly){
+  const stripes = colors.map((c,i)=>`<rect x="${i*(30/colors.length)}" y="0" width="${30/colors.length+0.5}" height="14" fill="${c}"/>`).join('');
+  const grey = unlocked ? '' : `<rect x="0" y="0" width="30" height="14" fill="rgba(0,0,0,0.55)"/>`;
+  if(ribbonOnly){
+    return `<svg viewBox="0 0 30 14" width="30" height="14">${stripes}${grey}</svg>`;
+  }
+  const medalColor = unlocked ? '#ffd23f' : '#555';
+  return `<svg viewBox="0 0 30 60" width="30" height="60">
+    <g>${stripes}${grey}</g>
+    <line x1="8" y1="14" x2="12" y2="30" stroke="#8a7a4a" stroke-width="1.5"/>
+    <line x1="22" y1="14" x2="18" y2="30" stroke="#8a7a4a" stroke-width="1.5"/>
+    <circle cx="15" cy="42" r="14" fill="${medalColor}" stroke="#7a6a1a" stroke-width="1.5"/>
+    <path d="M15 33 L17.5 39 L24 39 L18.7 43 L20.7 49.5 L15 45.5 L9.3 49.5 L11.3 43 L6 39 L12.5 39 Z" fill="${unlocked?'#fff8e0':'#333'}"/>
+  </svg>`;
 }
 
 /* ---------- rollover ---------- */
@@ -485,7 +536,7 @@ function secHome(){
     <h2>MISSION OVERVIEW</h2>
     <div class="sub">${fmtDateLong(t)}</div>
   </div>
-  <img src="${RADHA_KRISHNA_SRC}" alt="Radha Krishna" onclick="openRKModal()" style="float:right; width:230px; max-width:48vw; border-radius:14px; border:1px solid var(--border-strong); box-shadow:0 10px 30px rgba(0,0,0,.45); margin:-60px 0 14px 16px; cursor:pointer;">
+  <img src="${currentRKImage()}" alt="Radha Krishna" onclick="openRKModal()" style="float:right; width:230px; max-width:48vw; border-radius:14px; border:1px solid var(--border-strong); box-shadow:0 10px 30px rgba(0,0,0,.45); margin:-60px 0 14px 16px; cursor:pointer;">
 
   <div class="grid c3" style="align-items:stretch;">
     <div class="panel" style="text-align:center;">
@@ -500,9 +551,9 @@ function secHome(){
 
     <div class="panel" style="text-align:center; display:flex; flex-direction:column; justify-content:center;">
       <div class="eyebrow">MISSION PROGRESS</div>
-      <div class="stat-big" style="font-size:52px;">${Math.round((rank.xp/RANKS[RANKS.length-1].xp)*100)}%</div>
+      <div class="stat-big" style="font-size:52px;">${Math.round(clamp(rank.xp/rankXP(RANKS.length-1)*100,0,100))}%</div>
       <div class="stat-label">TOWARD FIELD MARSHAL</div>
-      <div class="bar cyan" style="margin-top:14px;"><i style="width:${clamp((rank.xp/RANKS[RANKS.length-1].xp)*100,0,100)}%"></i></div>
+      <div class="bar cyan" style="margin-top:14px;"><i style="width:${clamp(rank.xp/rankXP(RANKS.length-1)*100,0,100)}%"></i></div>
     </div>
 
     <div class="panel" style="text-align:center; display:flex; flex-direction:column; justify-content:center;">
@@ -620,6 +671,13 @@ function secProfile(){
     <div class="panel" style="text-align:center;">
       <img src="${currentProfilePhoto()}" alt="Agent" onclick="openPhotoModal()" style="width:150px; height:150px; object-fit:cover; border-radius:50%; border:3px solid var(--border-strong); box-shadow:0 0 24px rgba(215,121,241,.4); cursor:pointer;">
       <div class="stat-label" style="margin-top:6px;">TAP PHOTO TO ENLARGE</div>
+      ${(()=>{ const unlocked = getMedals().filter(m=>m.unlocked); return unlocked.length ? `
+      <div style="margin-top:10px;">
+        <div class="eyebrow" style="margin-bottom:6px;">RIBBON BAR</div>
+        <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:2px; max-width:200px; margin:0 auto;">
+          ${unlocked.map(m=>`<span title="${esc(m.name)}">${medalSVG(m.ribbon, true, true)}</span>`).join('')}
+        </div>
+      </div>` : ''; })()}
       <div style="margin-top:10px;">
         <label class="btn ghost sm" style="cursor:pointer;">Upload Profile Photo<input type="file" accept="image/*" style="display:none;" onchange="uploadProfilePhoto(this)"></label>
       </div>
@@ -988,8 +1046,8 @@ function secTrackers(){
     <h3><span class="ic">📚</span>STUDY TRACKER</h3>
     <div class="grid c4">
       <div class="field"><label class="f">Hours</label><input type="number" step="0.1" id="sd_hours" value="${sdEdit?sdEdit.hours:''}"></div>
-      <div class="field"><label class="f">Subject</label><input type="text" id="sd_subject" value="${sdEdit?esc(sdEdit.subject):''}"></div>
-      <div class="field"><label class="f">Topic</label><input type="text" id="sd_topic" value="${sdEdit?esc(sdEdit.topic||''):''}"></div>
+      <div class="field"><label class="f">Subject</label><select id="sd_subject">${SUBJECT_OPTIONS.map(s=>`<option value="${s}" ${sdEdit&&sdEdit.subject===s?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field"><label class="f">Topic</label><input type="text" id="sd_topic" value="${sdEdit?esc(sdEdit.topic||''):''}" placeholder="e.g. 1st Paper - Grammar"></div>
       <div class="field"><label class="f">Sessions</label><input type="number" id="sd_sessions" value="${sdEdit?sdEdit.sessions:1}"></div>
     </div>
     <button class="btn sm" onclick="saveStudyLog()">${sdEdit?'Update Entry':'Log Study Session (+10XP/hr)'}</button>
@@ -1078,26 +1136,35 @@ function saveStudyLog(){
 /* ========================================================
    SECTION: RANK SYSTEM
 ======================================================== */
+let rankEditMode = false;
 function secRank(){
   const rank = getRankInfo(state.xp);
+  const ranks = effectiveRanks();
   return `
   <div class="pagehead"><h2>RANK SYSTEM</h2><div class="sub">14 TIERS · JUNIOR OFFICER → SENIOR OFFICER → RETIRED · TAP A BADGE FOR DETAILS</div></div>
   <div class="panel" style="text-align:center; margin-bottom:16px;">
     <div class="eyebrow">CURRENT PROGRESS</div>
     <div class="stat-big" style="font-size:20px; margin:8px 0;">${rank.xp} XP ${rank.next? '&nbsp;/&nbsp; '+rank.next.xp+' XP TOWARD '+rank.next.name : '&nbsp;— MAX TIER'}</div>
     <div class="bar" style="max-width:520px; margin:0 auto;"><i style="width:${rank.pct}%"></i></div>
+    <div style="margin-top:12px;">
+      <button class="btn ghost sm" onclick="rankEditMode=!rankEditMode; renderSection();">${rankEditMode ? 'Done Editing' : '✎ Edit XP Requirements'}</button>
+      ${state.rankOverrides ? `<button class="btn ghost sm" onclick="resetRankXP()">Reset To Default</button>` : ''}
+    </div>
   </div>
   <div class="grid c4">
-    ${RANKS.map((r,i)=>{
+    ${ranks.map((r,i)=>{
       const achieved = i<=rank.idx; const isCurrent = i===rank.idx;
-      const next = RANKS[i+1];
+      const next = ranks[i+1];
       const rangeTxt = next ? `${r.xp} – ${next.xp-1} XP` : `${r.xp}+ XP`;
       const info = RANK_INFO[i];
-      return `<div class="panel" style="text-align:center; cursor:pointer; ${achieved?'':'opacity:.4; filter:grayscale(.6);'} ${isCurrent?'box-shadow:0 0 22px rgba(215,121,241,.5); border-color:var(--lavender);':''}" onclick="openRankInfo(${i})">
+      return `<div class="panel" style="text-align:center; ${rankEditMode?'':'cursor:pointer;'} ${achieved?'':'opacity:.4; filter:grayscale(.6);'} ${isCurrent?'box-shadow:0 0 22px rgba(215,121,241,.5); border-color:var(--lavender);':''}" ${rankEditMode?'':`onclick="openRankInfo(${i})"`}>
         <div class="tag">TIER ${i+1}</div>
         <div class="rankbadge" style="margin:10px auto;">${rankImg(i,42)}</div>
         <div style="font-family:'Orbitron'; font-size:12px; color:${isCurrent?'var(--lavender)':'var(--white)'};">${r.name}</div>
-        <div class="stat-label" style="margin-top:6px;">${rangeTxt}</div>
+        ${rankEditMode
+          ? (i===0 ? `<div class="stat-label" style="margin-top:6px;">FIXED AT 0 XP</div>`
+             : `<div class="field" style="margin-top:8px;"><input type="number" value="${r.xp}" onchange="setRankXP(${i}, this.value)"></div>`)
+          : `<div class="stat-label" style="margin-top:6px;">${rangeTxt}</div>`}
         <div class="stat-label" style="margin-top:4px; color:var(--cyan);">${info.group}${info.stars?' · '+starsRow(info.stars):''}</div>
       </div>`;
     }).join('')}
@@ -1113,13 +1180,18 @@ function secMedals(){
   return `
   <div class="pagehead"><h2>MEDALS &amp; AWARDS</h2><div class="sub">THE ACHIEVEMENT ROOM</div></div>
   <div class="grid c4">
-    ${medals.map(m=>`
+    ${medals.map(m=>{
+      const pct = clamp(m.current/m.target*100,0,100);
+      return `
       <div class="medal ${m.unlocked?'':'locked'}">
-        <div class="mic">${m.icon}</div>
+        <div class="mic">${medalSVG(m.ribbon, m.unlocked, false)}</div>
         <div class="mn">${m.name}</div>
         <div class="md">${m.desc}</div>
-        <div class="tag" style="margin-top:10px; ${m.unlocked?'color:var(--green); border-color:var(--green);':''}">${m.unlocked?'UNLOCKED':'LOCKED'}</div>
-      </div>`).join('')}
+        <div class="bar gold" style="margin-top:10px;"><i style="width:${pct}%"></i></div>
+        <div class="stat-label" style="margin-top:4px;">${Math.min(m.current,m.target)} / ${m.target}</div>
+        <div class="tag" style="margin-top:8px; ${m.unlocked?'color:var(--green); border-color:var(--green);':''}">${m.unlocked?'UNLOCKED':'LOCKED'}</div>
+      </div>`;
+    }).join('')}
   </div>
   `;
 }
@@ -1132,14 +1204,21 @@ function secBadges(){
   return `
   <div class="pagehead"><h2>SIDE ARM BADGE SYSTEM</h2><div class="sub">DSS · FITNESS · SKILLS SPECIALIZATION</div></div>
   <div class="grid c3">
-    ${badges.map(b=>`
-      <div class="badgechip ${b.unlocked?'':'locked'}">
-        <div class="bi">${b.icon}</div>
-        <div>
-          <div class="bn" style="font-family:'Orbitron'; font-size:12px;">${b.name}</div>
-          <div class="stat-label">${b.desc}</div>
+    ${badges.map(b=>{
+      const pct = clamp(b.current/b.target*100,0,100);
+      return `
+      <div class="badgechip ${b.unlocked?'':'locked'}" style="flex-direction:column; align-items:stretch;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="bi" style="border-radius:6px; width:auto; height:auto; padding:4px;">${medalSVG(b.ribbon, b.unlocked, true)}</div>
+          <div>
+            <div class="bn" style="font-family:'Orbitron'; font-size:12px;">${b.name}</div>
+            <div class="stat-label">${b.desc}</div>
+          </div>
         </div>
-      </div>`).join('')}
+        <div class="bar" style="margin-top:10px;"><i style="width:${pct}%"></i></div>
+        <div class="stat-label" style="margin-top:4px;">${Math.min(b.current,b.target)} / ${b.target}</div>
+      </div>`;
+    }).join('')}
   </div>
   <div class="panel" style="margin-top:16px;">
     <p style="color:var(--dim); font-size:13px;">Earn a Side Arm Badge by excelling in that field for 30+ days, per the OLC Rule Book.</p>
@@ -1244,8 +1323,43 @@ function saveCustomRules(){ state.ruleBookCustom = document.getElementById('rb_c
 function secArchives(){
   const dates = Object.keys(state.dailyLogs).sort((a,b)=>a<b?1:-1);
   const rankLog = getRankInfo(state.xp);
+
+  // Monthly rollups
+  const byMonth = {};
+  dates.forEach(d=>{
+    const ym = d.slice(0,7);
+    if(!byMonth[ym]) byMonth[ym] = { days:0, dssSum:0, fullGoals:0 };
+    byMonth[ym].days++;
+    byMonth[ym].dssSum += getDSS(d);
+    const day = state.dailyLogs[d];
+    byMonth[ym].fullGoals += goalsForDate(d).filter(g=>goalStatus(day,g.id)==='full').length;
+  });
+  const months = Object.keys(byMonth).sort((a,b)=>b<a?-1:1);
+
   return `
   <div class="pagehead"><h2>HISTORY &amp; ARCHIVES</h2><div class="sub">NOTHING GETS DELETED — ${dates.length} DAYS RECORDED</div></div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <h3><span class="ic">📅</span>MONTHLY SUMMARY</h3>
+    <div class="grid c3">
+      ${months.length ? months.map(ym=>{
+        const m = byMonth[ym];
+        const avgDss = Math.round(m.dssSum/m.days);
+        return `<div class="panel" style="text-align:center;">
+          <div class="eyebrow">${ym}</div>
+          <div class="stat-big" style="font-size:26px;">${avgDss}<span style="font-size:13px; color:var(--dim);"> avg DSS</span></div>
+          <div class="stat-label" style="margin-top:6px;">${m.days} days logged · ${m.fullGoals} goals completed</div>
+        </div>`;
+      }).join('') : '<div class="empty">No history yet</div>'}
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:space-between;">
+      <div class="field" style="margin:0; min-width:180px;"><label class="f">Jump to date</label><input type="date" id="historyJump" onchange="jumpToHistoryDate(this.value)"></div>
+      <button class="btn ghost sm" onclick="exportMyData()">⬇ Export My Data (JSON)</button>
+    </div>
+  </div>
 
   <div class="panel">
     <h3><span class="ic">🗄</span>DAILY REPORTS <span style="font-weight:400; color:var(--dim); font-size:11px;">(last 2 months · click a row for full detail)</span></h3>
@@ -1256,7 +1370,7 @@ function secArchives(){
         const activeGoals = goalsForDate(d);
         const done = activeGoals.filter(g=>goalStatus(day,g.id)==='full').length;
         const hasEod = day.eod.well || day.eod.failed || day.eod.learned || day.eod.tomorrow;
-        return `<tr style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${activeGoals.length}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
+        return `<tr id="hrow-${d}" style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${activeGoals.length}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
       }).join('') : '<tr><td colspan="5" class="empty">No history yet — complete your first day</td></tr>'}
     </table>
   </div>
@@ -1296,6 +1410,47 @@ function setTheme(theme){
   saveState();
 }
 
+const COLOR_THEMES = [
+  { id:'violet', label:'Violet (Classic)', swatch:'#d779f1' },
+  { id:'ocean', label:'Ocean', swatch:'#3fa9f5' },
+  { id:'emerald', label:'Emerald', swatch:'#22c55e' },
+  { id:'crimson', label:'Crimson', swatch:'#ef4444' },
+  { id:'amber', label:'Amber', swatch:'#f5a623' },
+  { id:'rose', label:'Rose', swatch:'#ec4899' },
+  { id:'mono', label:'Mono', swatch:'#b5b5c0' },
+];
+function setColorTheme(id){
+  state.settings.colorTheme = id;
+  if(id==='violet') document.documentElement.removeAttribute('data-color');
+  else document.documentElement.setAttribute('data-color', id);
+  saveState();
+  renderColorSwatches();
+}
+function renderColorSwatches(){
+  const el = document.getElementById('colorSwatches');
+  if(!el) return;
+  const active = (state && state.settings.colorTheme) || 'violet';
+  el.innerHTML = COLOR_THEMES.map(c=>`
+    <div class="panel" style="text-align:center; cursor:pointer; padding:12px; ${active===c.id?'border-color:var(--lavender); box-shadow:0 0 14px rgba(215,121,241,.4);':''}" onclick="setColorTheme('${c.id}')">
+      <div style="width:36px; height:36px; border-radius:50%; background:${c.swatch}; margin:0 auto 8px; border:2px solid rgba(255,255,255,.3);"></div>
+      <div style="font-size:12px;">${c.label}</div>
+    </div>`).join('');
+}
+function openThemeModal(){ document.getElementById('themeModal').style.display='flex'; renderColorSwatches(); }
+function closeThemeModal(){ document.getElementById('themeModal').style.display='none'; }
+
+/* ========================================================
+   MONK MODE — a calmer, distraction-reduced focus view
+======================================================== */
+function applyMonkMode(mode){
+  state.settings.mode = mode;
+  document.documentElement.classList.toggle('monk-mode', mode==='monk');
+  const btn = document.getElementById('modeBtn');
+  if(btn) btn.textContent = mode==='monk' ? '🏠 Normal Mode' : '🧘 Monk Mode';
+  saveState();
+}
+function toggleMonkMode(){ applyMonkMode(state.settings.mode==='monk' ? 'normal' : 'monk'); }
+
 /* ========================================================
    ID CARD 3D FLIP MODAL
 ======================================================== */
@@ -1308,10 +1463,30 @@ function flipIdCard(){ document.getElementById('idCard3d').classList.toggle('fli
 function openPhotoModal(){ document.getElementById('photoModal').style.display = 'flex'; }
 function closePhotoModal(){ document.getElementById('photoModal').style.display = 'none'; }
 
+function setRankXP(i, val){
+  const n = Number(val);
+  if(isNaN(n)){ renderSection(); return; }
+  const ranks = effectiveRanks();
+  const prev = ranks[i-1] ? ranks[i-1].xp : -1;
+  const next = ranks[i+1] ? ranks[i+1].xp : Infinity;
+  if(n<=prev || n>=next){
+    alert(`${RANKS[i].name} must be more than ${prev>=0?prev:0} XP and less than ${next===Infinity?'∞':next} XP to keep ranks in order.`);
+    renderSection(); return;
+  }
+  if(!state.rankOverrides) state.rankOverrides = RANKS.map(r=>r.xp);
+  state.rankOverrides[i] = n;
+  saveState(); renderSection();
+}
+function resetRankXP(){
+  if(!confirm('Reset all rank XP requirements back to the original OLC values?')) return;
+  state.rankOverrides = null;
+  saveState(); renderSection();
+}
 function openRankInfo(idx){
-  const r = RANKS[idx];
+  const ranks = effectiveRanks();
+  const r = ranks[idx];
   const info = RANK_INFO[idx];
-  const next = RANKS[idx+1];
+  const next = ranks[idx+1];
   const rangeTxt = next ? `${r.xp} – ${next.xp-1} XP` : `${r.xp}+ XP`;
   document.getElementById('rankInfoBody').innerHTML = `
     <div style="text-align:center;">
@@ -1329,6 +1504,20 @@ function openRankInfo(idx){
 }
 function closeRankInfo(){ document.getElementById('rankInfoModal').style.display = 'none'; }
 
+function jumpToHistoryDate(date){
+  if(!date || !state.dailyLogs[date]){ alert('No history recorded for that date.'); return; }
+  openDayDetail(date);
+  setTimeout(()=>{ document.getElementById('hrow-'+date)?.scrollIntoView({behavior:'smooth', block:'center'}); }, 300);
+}
+function exportMyData(){
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type:'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `olc-backup-${(loggedAccount()?.codename||'agent').replace(/\s+/g,'_')}-${todayStr()}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 function openDayDetail(date){
   const day = state.dailyLogs[date];
   if(!day) return;
@@ -1518,6 +1707,8 @@ function enterApp(){
 function runBootAndApp(){
   rollover();
   setTheme(state.settings.theme || 'dark');
+  if(state.settings.colorTheme && state.settings.colorTheme!=='violet') document.documentElement.setAttribute('data-color', state.settings.colorTheme);
+  applyMonkMode(state.settings.mode || 'normal');
   syncProfileImagesToDOM();
   document.querySelectorAll('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.sec==='home'));
   renderAll();
