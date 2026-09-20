@@ -282,6 +282,7 @@ input[type=text],input[type=number],input[type=date],input[type=time],select,tex
   color:var(--white); padding:8px 10px; border-radius:6px; font-family:'Rajdhani'; font-size:14px;
 }
 input:focus,select:focus,textarea:focus{ outline:none; border-color:var(--lavender); box-shadow:0 0 0 3px color-mix(in srgb, var(--lavender) 12%, transparent); }
+input[type=color]{ width:44px; height:34px; padding:2px; border:1px solid var(--border); border-radius:6px; background:rgba(255,255,255,0.05); cursor:pointer; }
 label.f{ display:block; font-family:'Share Tech Mono'; font-size:10px; color:var(--dim); letter-spacing:.12em; margin-bottom:4px; text-transform:uppercase; }
 .field{ margin-bottom:10px; }
 textarea{ resize:vertical; min-height:70px; }

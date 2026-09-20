@@ -82,6 +82,7 @@ const DEFAULT_STATE = {
     reading:{count:0,lastDate:null,_pc:0,_pd:null},
     wakeup:{count:0,lastDate:null,_pc:0,_pd:null},
     habit:{count:0,lastDate:null,_pc:0,_pd:null},
+    screen:{count:0,lastDate:null,_pc:0,_pd:null},
   },
   dailyLogs:{},
   trackerLogs:{ weight:[], height:[], exercise:[], study:[], sleep:[] },
@@ -89,6 +90,8 @@ const DEFAULT_STATE = {
   rankOverrides:null, // null = use built-in XP thresholds; else array of 14 custom XP numbers
   customImages:{ radhaKrishna:null }, // null = use bundled default image
   ruleBookCustom:'',
+  customMedals:[], // [{id,name,requirements,connection,target,current,colors:[c1,c2,c3],medalImg,ribbonImg,timesEarned}]
+  achievements:[], // permanent log: [{id,medalId,name,date,colors,medalImg,ribbonImg}]
 };
 
 let state = null;
@@ -173,14 +176,15 @@ function ensureDay(date){
     state.dailyLogs[date] = {
       items:{}, ratings:{ study:0, exercise:0, spiritual:0, mood:0 },
       wokeOnTime:false, readingDone:false, waterL:0,
-      screen:{ totalMin:0, devices:[], awarded:false }, // devices: [{id,name,purpose,apps:[{id,name,min}]}]
+      screen:{ totalMin:0, devices:[], awarded:false, xpApplied:0 }, // devices: [{id,name,purpose,apps:[{id,name,min}]}]
       planner:{ morning:'', afternoon:'', night:'' },
       eod:{ well:'', failed:'', learned:'', tomorrow:'' },
     };
   }
   const d = state.dailyLogs[date];
   if(!d.ratings) d.ratings = { study:0, exercise:0, spiritual:0, mood:0 };
-  if(!d.screen) d.screen = { totalMin:0, devices:[], awarded:false };
+  if(!d.screen) d.screen = { totalMin:0, devices:[], awarded:false, xpApplied:0 };
+  if(d.screen.xpApplied===undefined) d.screen.xpApplied = 0;
   // Migrate any legacy flat {devices:[{name,min}], apps:[...], purposes:[...]} shape
   // from before apps/purposes lived under each device.
   if(d.screen.devices && d.screen.devices.some(dv => dv && !Array.isArray(dv.apps))){
@@ -222,6 +226,9 @@ async function loadStateFor(accountId){
     if(raw){ const loaded = JSON.parse(raw); state = Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_STATE)), loaded); }
     else state = JSON.parse(JSON.stringify(DEFAULT_STATE));
   }catch(e){ state = JSON.parse(JSON.stringify(DEFAULT_STATE)); }
+  if(!state.streaks.screen) state.streaks.screen = {count:0,lastDate:null,_pc:0,_pd:null};
+  if(!state.customMedals) state.customMedals = [];
+  if(!state.achievements) state.achievements = [];
   activeAccountId = accountId;
 }
 function saveState(){
@@ -463,6 +470,143 @@ function medalSVG(colors, unlocked, ribbonOnly){
   </svg>`;
 }
 
+/* ========================================================
+   CUSTOM MEDAL SYSTEM — user-created, repeatable medals
+   Each medal has its own progress bar toward a target you set.
+   Reaching the target lets you claim it: the claim is logged
+   forever in Achievements and on the Agent Profile ribbon bar,
+   then the bar resets to 0 so the same medal can be earned again.
+======================================================== */
+const DEFAULT_MEDAL_COLORS = ['#6753b7','#d779f1','#6753b7'];
+let medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null };
+
+function medalGraphic(m, size){
+  size = size || 60;
+  if(m.medalImg) return `<img src="${m.medalImg}" style="width:${size}px; height:${size}px; object-fit:contain; border-radius:50%;">`;
+  return medalSVG((m.colors && m.colors.length===3) ? m.colors : DEFAULT_MEDAL_COLORS, true, false);
+}
+function ribbonGraphic(m){
+  if(m.ribbonImg) return `<img src="${m.ribbonImg}" style="width:30px; height:14px; object-fit:cover; border-radius:2px;">`;
+  return medalSVG((m.colors && m.colors.length===3) ? m.colors : DEFAULT_MEDAL_COLORS, true, true);
+}
+
+function openAddMedalForm(){ medalForm = { open:true, editId:null, medalImg:null, ribbonImg:null }; renderSection(); setTimeout(()=>document.getElementById('medalFormPanel')?.scrollIntoView({behavior:'smooth', block:'center'}), 60); }
+function openEditMedalForm(id){
+  const m = state.customMedals.find(x=>x.id===id); if(!m) return;
+  medalForm = { open:true, editId:id, medalImg:m.medalImg||null, ribbonImg:m.ribbonImg||null };
+  renderSection();
+  setTimeout(()=>document.getElementById('medalFormPanel')?.scrollIntoView({behavior:'smooth', block:'center'}), 60);
+}
+function closeMedalForm(){ medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null }; renderSection(); }
+
+async function uploadMedalFormImage(input, kind){
+  const file = input.files && input.files[0]; if(!file) return;
+  try{
+    const dataUrl = await fileToCompressedDataURL(file, 300, 0.9);
+    if(kind==='medal') medalForm.medalImg = dataUrl; else medalForm.ribbonImg = dataUrl;
+    renderSection();
+  }catch(e){ alert('Could not read that image — try a different file.'); }
+}
+function clearMedalFormImage(kind){ if(kind==='medal') medalForm.medalImg=null; else medalForm.ribbonImg=null; renderSection(); }
+
+function saveMedalForm(){
+  const name = document.getElementById('mf_name').value.trim();
+  if(!name){ alert('Give the medal a name first.'); return; }
+  const requirements = document.getElementById('mf_requirements').value.trim();
+  const connection = document.getElementById('mf_connection').value.trim();
+  const target = Math.max(1, Number(document.getElementById('mf_target').value)||1);
+  const colors = [
+    document.getElementById('mf_color1').value || DEFAULT_MEDAL_COLORS[0],
+    document.getElementById('mf_color2').value || DEFAULT_MEDAL_COLORS[1],
+    document.getElementById('mf_color3').value || DEFAULT_MEDAL_COLORS[2],
+  ];
+  if(medalForm.editId){
+    const m = state.customMedals.find(x=>x.id===medalForm.editId);
+    if(m) Object.assign(m, { name, requirements, connection, target, colors, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg });
+  } else {
+    state.customMedals.push({
+      id: uid('medal'), name, requirements, connection, target, current:0,
+      colors, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg,
+      timesEarned:0, createdDate: todayStr(),
+    });
+  }
+  closeMedalForm();
+  saveState(); renderSection();
+}
+
+function deleteCustomMedal(id){
+  if(!confirm('Delete this medal? Its permanent record in Achievements is kept, but the medal card and its live progress will be removed.')) return;
+  state.customMedals = state.customMedals.filter(m=>m.id!==id);
+  saveState(); renderSection();
+}
+
+function bumpMedalProgress(id, delta){
+  const m = state.customMedals.find(x=>x.id===id); if(!m) return;
+  m.current = Math.max(0, (Number(m.current)||0) + delta);
+  saveState(); renderSection();
+}
+function setMedalProgress(id, val){
+  const m = state.customMedals.find(x=>x.id===id); if(!m) return;
+  m.current = Math.max(0, Number(val)||0);
+  saveState(); renderSection();
+}
+
+/* Claiming: logs a permanent Achievement entry (with a snapshot of the medal's
+   look), adds one to timesEarned so the ribbon bar can show it, then resets
+   the medal's own progress bar back to 0 so it can be worked toward again. */
+function claimMedal(id){
+  const m = state.customMedals.find(x=>x.id===id); if(!m) return;
+  if(m.current < m.target) return;
+  state.achievements.unshift({
+    id: uid('ach'), medalId: m.id, name: m.name, date: todayStr(),
+    colors: m.colors, medalImg: m.medalImg, ribbonImg: m.ribbonImg,
+  });
+  m.timesEarned = (m.timesEarned||0) + 1;
+  m.current = 0;
+  saveState(); renderSection();
+}
+
+function medalFormHTML(){
+  const editing = !!medalForm.editId;
+  const m = editing ? state.customMedals.find(x=>x.id===medalForm.editId) : null;
+  const colors = (m && m.colors) || DEFAULT_MEDAL_COLORS;
+  return `
+  <div class="panel" id="medalFormPanel" style="margin-top:16px; border-color:var(--border-strong);">
+    <h3><span class="ic">🎖</span>${editing?'EDIT MEDAL':'ADD MEDAL'}</h3>
+    <div class="grid c2">
+      <div class="field"><label class="f">Medal Name</label><input type="text" id="mf_name" value="${m?esc(m.name):''}" placeholder="e.g. Iron Focus Medal"></div>
+      <div class="field"><label class="f">Target (bar completes at this number)</label><input type="number" id="mf_target" min="1" value="${m?m.target:30}"></div>
+    </div>
+    <div class="field"><label class="f">Requirements — how is it earned?</label><textarea id="mf_requirements" rows="2" placeholder="e.g. 30 days without a single missed study session">${m?esc(m.requirements||''):''}</textarea></div>
+    <div class="field"><label class="f">Connection — what is it linked to? (optional)</label><input type="text" id="mf_connection" value="${m?esc(m.connection||''):''}" placeholder="e.g. Study Streak, Screen Time Discipline, Gripper Training"></div>
+
+    <label class="f">Ribbon Colors <span style="font-weight:400; color:var(--dim);">(used when no custom image is uploaded)</span></label>
+    <div style="display:flex; gap:10px; margin-bottom:12px;">
+      <input type="color" id="mf_color1" value="${colors[0]}">
+      <input type="color" id="mf_color2" value="${colors[1]}">
+      <input type="color" id="mf_color3" value="${colors[2]}">
+    </div>
+
+    <div class="grid c2">
+      <div>
+        <label class="f">Medal Image <span style="font-weight:400; color:var(--dim);">(optional)</span></label>
+        ${medalForm.medalImg ? `<div style="margin-bottom:6px; display:flex; align-items:center; gap:8px;"><img src="${medalForm.medalImg}" style="width:50px; height:50px; object-fit:contain;"><button class="btn ghost sm" onclick="clearMedalFormImage('medal')">✕ Remove</button></div>` : ''}
+        <label class="btn ghost sm" style="cursor:pointer;">Upload Medal Image<input type="file" accept="image/*" style="display:none;" onchange="uploadMedalFormImage(this,'medal')"></label>
+      </div>
+      <div>
+        <label class="f">Ribbon Image <span style="font-weight:400; color:var(--dim);">(optional — can add on its own)</span></label>
+        ${medalForm.ribbonImg ? `<div style="margin-bottom:6px; display:flex; align-items:center; gap:8px;"><img src="${medalForm.ribbonImg}" style="width:30px; height:14px; object-fit:cover;"><button class="btn ghost sm" onclick="clearMedalFormImage('ribbon')">✕ Remove</button></div>` : ''}
+        <label class="btn ghost sm" style="cursor:pointer;">Upload Ribbon Image<input type="file" accept="image/*" style="display:none;" onchange="uploadMedalFormImage(this,'ribbon')"></label>
+      </div>
+    </div>
+
+    <div style="margin-top:14px; display:flex; gap:8px;">
+      <button class="btn" onclick="saveMedalForm()">${editing?'Save Changes':'Create Medal'}</button>
+      <button class="btn ghost" onclick="closeMedalForm()">Cancel</button>
+    </div>
+  </div>`;
+}
+
 /* ---------- rollover ---------- */
 function rollover(){ ensureDay(todayStr()); saveState(); }
 
@@ -472,6 +616,7 @@ function rollover(){ ensureDay(todayStr()); saveState(); }
 function go(sec){
   currentSection = sec;
   editingTracker = { name:null, index:null };
+  if(sec!=='medals') medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null };
   if(sec==='rulebook') fbIndex = 0;
   document.querySelectorAll('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.sec===sec));
   renderSection();
@@ -498,7 +643,7 @@ function closeRKModal(){ document.getElementById('rkModal').style.display = 'non
 function renderSection(){
   const map = { home:secHome, dashboard:secDashboard, profile:secProfile, mission:secMission,
     streaks:secStreaks, daily:secDaily, trackers:secTrackers, rank:secRank, medals:secMedals,
-    badges:secBadges, rulebook:secRulebook, archives:secArchives };
+    achievements:secAchievements, badges:secBadges, rulebook:secRulebook, archives:secArchives };
   const fn = map[currentSection] || secHome;
   document.getElementById('mainContent').innerHTML = fn();
   renderTopbar();
@@ -671,13 +816,18 @@ function secProfile(){
     <div class="panel" style="text-align:center;">
       <img src="${currentProfilePhoto()}" alt="Agent" onclick="openPhotoModal()" style="width:150px; height:150px; object-fit:cover; border-radius:50%; border:3px solid var(--border-strong); box-shadow:0 0 24px rgba(215,121,241,.4); cursor:pointer;">
       <div class="stat-label" style="margin-top:6px;">TAP PHOTO TO ENLARGE</div>
-      ${(()=>{ const unlocked = getMedals().filter(m=>m.unlocked); return unlocked.length ? `
+      ${(()=>{
+        const autoUnlocked = getMedals().filter(m=>m.unlocked);
+        const earnedCustom = (state.customMedals||[]).filter(m=>m.timesEarned>0);
+        if(!autoUnlocked.length && !earnedCustom.length) return '';
+        return `
       <div style="margin-top:10px;">
         <div class="eyebrow" style="margin-bottom:6px;">RIBBON BAR</div>
-        <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:2px; max-width:200px; margin:0 auto;">
-          ${unlocked.map(m=>`<span title="${esc(m.name)}">${medalSVG(m.ribbon, true, true)}</span>`).join('')}
+        <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:2px; max-width:220px; margin:0 auto;">
+          ${autoUnlocked.map(m=>`<span title="${esc(m.name)}">${medalSVG(m.ribbon, true, true)}</span>`).join('')}
+          ${earnedCustom.map(m=>`<span title="${esc(m.name)} (×${m.timesEarned})">${ribbonGraphic(m)}</span>`).join('')}
         </div>
-      </div>` : ''; })()}
+      </div>`; })()}
       <div style="margin-top:10px;">
         <label class="btn ghost sm" style="cursor:pointer;">Upload Profile Photo<input type="file" accept="image/*" style="display:none;" onchange="uploadProfilePhoto(this)"></label>
       </div>
@@ -779,6 +929,7 @@ const STREAK_META = {
   study:{label:'STUDY STREAK', icon:'📘'}, fitness:{label:'FITNESS STREAK', icon:'💪'},
   spiritual:{label:'SPIRITUAL STREAK', icon:'🕊️'}, reading:{label:'READING STREAK', icon:'📖'},
   wakeup:{label:'WAKE-UP STREAK', icon:'⏰'}, habit:{label:'HABIT STREAK (PERFECT DAYS)', icon:'⚡'},
+  screen:{label:'SCREEN DISCIPLINE STREAK', icon:'📱'},
 };
 function secStreaks(){
   return `
@@ -796,7 +947,7 @@ function secStreaks(){
     }).join('')}
   </div>
   <div class="panel" style="margin-top:16px;">
-    <p style="color:var(--dim); font-size:13px;">Study, Fitness and Spiritual streaks update automatically when you give that category a star rating in Daily Operations. Reading and Wake-Up streaks are logged with manual toggles. Habit streak counts consecutive days where <b style="color:var(--white)">every</b> Daily Goal was completed — the mark of Iron Discipline.</p>
+    <p style="color:var(--dim); font-size:13px;">Study, Fitness and Spiritual streaks update automatically when you give that category a star rating in Daily Operations. Reading and Wake-Up streaks are logged with manual toggles. Habit streak counts consecutive days where <b style="color:var(--white)">every</b> Daily Goal was completed — the mark of Iron Discipline. Screen Discipline streak builds on every day you save Screen Time within your limit — Tracker Division awards +10XP per hour under the limit, and deducts -10XP per hour over it.</p>
   </div>
   `;
 }
@@ -956,6 +1107,7 @@ function secTrackers(){
       </div>
       <div class="bar" style="margin:10px 0;"><i style="width:${Math.min(screenPct,100)}%; background:${screen.totalMin>state.settings.screenLimit?'linear-gradient(90deg,#8a1030,var(--danger))':'linear-gradient(90deg,var(--violet),var(--lavender))'}"></i></div>
       <div class="stat-label">${screen.totalMin} / ${state.settings.screenLimit} MIN — ${screen.totalMin<=state.settings.screenLimit && screen.totalMin>0 ? 'WITHIN LIMIT ✓' : screen.totalMin===0 ? 'NOT LOGGED' : 'OVER LIMIT ✗'}</div>
+      <div class="stat-label" style="margin-top:4px; color:${computeScreenXP(screen.totalMin,state.settings.screenLimit)<0?'var(--danger)':'var(--lavender)'};">${screen.totalMin===0?'Log your time to see today\'s XP effect':(computeScreenXP(screen.totalMin,state.settings.screenLimit)>=0?'+':'')+computeScreenXP(screen.totalMin,state.settings.screenLimit)+' XP for today'}</div>
 
       <label class="f" style="margin-top:14px;">Devices</label>
       ${screen.devices.map((dv,di)=>`
@@ -975,7 +1127,7 @@ function secTrackers(){
         </div>`).join('') || '<div class="empty">No devices logged yet</div>'}
       <button class="btn ghost sm" onclick="addScreenDevice()">+ Add Device</button>
 
-      <button class="btn sm" style="margin-top:14px; display:block;" onclick="saveScreenTime()">Save Screen Time (+10XP if compliant)</button>
+      <button class="btn sm" style="margin-top:14px; display:block;" onclick="saveScreenTime()">Save Screen Time (+10XP/hr under · -10XP/hr over limit)</button>
     </div>
   </div>
 
@@ -1031,13 +1183,17 @@ function secTrackers(){
         <button type="button" class="btn ${(exEdit?exEdit.type:exerciseTypeSel)==='common'?'':'ghost'} sm" onclick="exerciseTypeSel='common'; renderSection();">Common</button>
       </div>
       <div class="grid c2">
-        <div class="field"><label class="f">Gripper Count</label><input type="number" id="ex_gripper" value="${exEdit?exEdit.gripper:''}"></div>
+        <div class="field"><label class="f">Exercise Name</label><input type="text" id="ex_name" value="${exEdit?esc(exEdit.name||''):''}" placeholder="e.g. Push-ups, Running"></div>
+        <div class="field"><label class="f">How Many / How Much</label><input type="text" id="ex_amount" value="${exEdit?esc(exEdit.amount||''):''}" placeholder="e.g. 3 sets x 20, 2 km"></div>
+      </div>
+      <div class="grid c2">
         <div class="field"><label class="f">Duration (min)</label><input type="number" id="ex_duration" value="${exEdit?exEdit.durationMin:''}"></div>
+        <div class="field"><label class="f">Gripper Count</label><input type="number" id="ex_gripper" value="${exEdit?exEdit.gripper:''}"></div>
       </div>
       <button class="btn sm" onclick="saveExerciseLog()">${exEdit?'Update Entry':'Log Exercise Session'}</button>
       ${exEdit?`<button class="btn ghost sm" onclick="cancelEdit()">Cancel</button>`:''}
-      <table style="margin-top:12px;"><tr><th>Date</th><th>Type</th><th>Gripper</th><th>Min</th><th></th></tr>
-      ${exLog.length? exLog.map(e=>`<tr><td>${e.date}</td><td>${e.type||'—'}</td><td>${e.gripper||0}</td><td>${e.durationMin||0}</td><td><button class="btn ghost sm" onclick="startEditEntry('exercise',${e._i})">✎</button> <button class="btn ghost sm" onclick="deleteTrackerEntry('exercise',${e._i})">🗑</button></td></tr>`).join(''):'<tr><td colspan="5" class="empty">No entries yet</td></tr>'}
+      <table style="margin-top:12px;"><tr><th>Date</th><th>Type</th><th>Exercise</th><th>Amount</th><th>Min</th><th>Gripper</th><th></th></tr>
+      ${exLog.length? exLog.map(e=>`<tr><td>${e.date}</td><td>${e.type||'—'}</td><td>${esc(e.name||'—')}</td><td>${esc(e.amount||'—')}</td><td>${e.durationMin||0}</td><td>${e.gripper||0}</td><td><button class="btn ghost sm" onclick="startEditEntry('exercise',${e._i})">✎</button> <button class="btn ghost sm" onclick="deleteTrackerEntry('exercise',${e._i})">🗑</button></td></tr>`).join(''):'<tr><td colspan="7" class="empty">No entries yet</td></tr>'}
       </table>
     </div>
   </div>
@@ -1074,13 +1230,26 @@ function removeScreenApp(deviceIdx, appIdx){ const day=ensureDay(todayStr()); da
 function updateScreenApp(deviceIdx, appIdx, field, val){ const day=ensureDay(todayStr()); day.screen.devices[deviceIdx].apps[appIdx][field] = field==='min' ? (Number(val)||0) : val; saveState(); }
 function updateScreenTotal(v){ const day=ensureDay(todayStr()); day.screen.totalMin = Number(v)||0; saveState(); renderSection(); }
 function updateScreenLimit(v){ state.settings.screenLimit = Number(v)||180; saveState(); renderSection(); }
+/* +10 XP for every hour spent UNDER the daily limit (rewards discipline & a streak);
+   -10 XP for every hour spent OVER the daily limit (penalizes losing control). */
+function computeScreenXP(totalMin, limit){
+  totalMin = Number(totalMin)||0; limit = Number(limit)||0;
+  if(totalMin<=0) return 0;
+  if(totalMin>limit){ const hrsOver = (totalMin-limit)/60; return -Math.round(hrsOver*10); }
+  const hrsUnder = (limit-totalMin)/60;
+  return Math.round(hrsUnder*10);
+}
 function saveScreenTime(){
   const day = ensureDay(todayStr());
   day.screen.totalMin = Number(document.getElementById('scr_total').value)||0;
   state.settings.screenLimit = Number(document.getElementById('scr_limit').value)||180;
-  const compliant = day.screen.totalMin <= state.settings.screenLimit && day.screen.totalMin>0;
-  if(compliant && !day.screen.awarded){ addXP(10); day.screen.awarded=true; }
-  else if(!compliant && day.screen.awarded){ addXP(-10); day.screen.awarded=false; }
+  const newXP = computeScreenXP(day.screen.totalMin, state.settings.screenLimit);
+  const prevXP = day.screen.xpApplied||0;
+  addXP(newXP - prevXP);
+  day.screen.xpApplied = newXP;
+  const compliant = day.screen.totalMin>0 && day.screen.totalMin <= state.settings.screenLimit;
+  day.screen.awarded = compliant;
+  if(compliant) streakCheck('screen', todayStr()); else streakUncheck('screen', todayStr());
   saveState(); renderSection();
 }
 
@@ -1107,12 +1276,14 @@ function saveHeightLog(){
   saveState(); renderSection();
 }
 function saveExerciseLog(){
+  const name=document.getElementById('ex_name').value.trim();
+  const amount=document.getElementById('ex_amount').value.trim();
   const gripper=Number(document.getElementById('ex_gripper').value)||0;
   const durationMin=Number(document.getElementById('ex_duration').value)||0;
   const type = exerciseTypeSel;
-  if(!gripper && !durationMin) return;
-  if(editingTracker.name==='exercise'){ state.trackerLogs.exercise[editingTracker.index] = Object.assign({}, state.trackerLogs.exercise[editingTracker.index], {type, gripper, durationMin}); editingTracker={name:null,index:null}; }
-  else state.trackerLogs.exercise.push({date:todayStr(), type, gripper, durationMin});
+  if(!name && !gripper && !durationMin) return;
+  if(editingTracker.name==='exercise'){ state.trackerLogs.exercise[editingTracker.index] = Object.assign({}, state.trackerLogs.exercise[editingTracker.index], {type, name, amount, gripper, durationMin}); editingTracker={name:null,index:null}; }
+  else state.trackerLogs.exercise.push({date:todayStr(), type, name, amount, gripper, durationMin});
   saveState(); renderSection();
 }
 function saveStudyLog(){
@@ -1176,22 +1347,77 @@ function secRank(){
    SECTION: MEDALS
 ======================================================== */
 function secMedals(){
-  const medals = getMedals();
+  const medals = state.customMedals || [];
+  const autoMedals = getMedals();
   return `
-  <div class="pagehead"><h2>MEDALS &amp; AWARDS</h2><div class="sub">THE ACHIEVEMENT ROOM</div></div>
-  <div class="grid c4">
-    ${medals.map(m=>{
-      const pct = clamp(m.current/m.target*100,0,100);
+  <div class="pagehead"><h2>MEDALS &amp; AWARDS</h2><div class="sub">DESIGN YOUR OWN DECORATIONS</div></div>
+
+  <div class="panel">
+    <button class="btn" onclick="openAddMedalForm()">+ Add Medal</button>
+    <p class="stat-label" style="margin-top:10px; line-height:1.6;">Create your own medal: name it, set the requirements to earn it, note what it's connected to, and pick a target number. Track the bar with +1 / -1 or by typing a number directly. Once the bar is full, Claim it — the claim is stored forever in Achievements and its ribbon joins your Agent Profile. Claiming resets the bar to 0 so the same medal can be earned all over again.</p>
+  </div>
+
+  ${medalForm.open ? medalFormHTML() : ''}
+
+  <div class="grid c3" style="margin-top:16px;">
+    ${medals.length ? medals.map(m=>{
+      const pct = clamp((m.current/m.target)*100,0,100);
+      const ready = m.current >= m.target;
       return `
-      <div class="medal ${m.unlocked?'':'locked'}">
-        <div class="mic">${medalSVG(m.ribbon, m.unlocked, false)}</div>
-        <div class="mn">${m.name}</div>
-        <div class="md">${m.desc}</div>
+      <div class="medal" id="medalcard_${m.id}" style="${ready?'border-color:var(--gold); box-shadow:0 0 14px color-mix(in srgb, var(--gold) 35%, transparent);':''}">
+        <div class="mic">${medalGraphic(m,60)}</div>
+        <div class="mn">${esc(m.name)}</div>
+        ${m.requirements?`<div class="md">${esc(m.requirements)}</div>`:''}
+        ${m.connection?`<div class="tag" style="margin-top:6px;">Connected: ${esc(m.connection)}</div>`:''}
         <div class="bar gold" style="margin-top:10px;"><i style="width:${pct}%"></i></div>
-        <div class="stat-label" style="margin-top:4px;">${Math.min(m.current,m.target)} / ${m.target}</div>
-        <div class="tag" style="margin-top:8px; ${m.unlocked?'color:var(--green); border-color:var(--green);':''}">${m.unlocked?'UNLOCKED':'LOCKED'}</div>
+        <div class="stat-label" style="margin-top:4px;">${m.current} / ${m.target}${m.timesEarned?` · Earned ${m.timesEarned}×`:''}</div>
+        <div style="display:flex; gap:6px; justify-content:center; align-items:center; margin-top:8px; flex-wrap:wrap;">
+          <button class="btn ghost sm" onclick="bumpMedalProgress('${m.id}',-1)">-1</button>
+          <input type="number" style="width:60px; text-align:center;" value="${m.current}" onchange="setMedalProgress('${m.id}', this.value)">
+          <button class="btn ghost sm" onclick="bumpMedalProgress('${m.id}',1)">+1</button>
+        </div>
+        <button class="btn ${ready?'':'ghost'} sm" style="margin-top:8px; width:100%; ${ready?'':'opacity:.5;'}" ${ready?`onclick="claimMedal('${m.id}')"`:'disabled'}>${ready?'🎖 Claim Medal':'Locked'}</button>
+        <div style="display:flex; gap:6px; justify-content:center; margin-top:6px;">
+          <button class="btn ghost sm" onclick="openEditMedalForm('${m.id}')">Edit</button>
+          <button class="btn ghost sm" onclick="deleteCustomMedal('${m.id}')">Delete</button>
+        </div>
       </div>`;
-    }).join('')}
+    }).join('') : '<div class="empty" style="grid-column:1/-1;">No medals yet — tap "+ Add Medal" above to create your first one.</div>'}
+  </div>
+
+  <div style="margin-top:26px; border-top:1px solid var(--border); padding-top:16px;">
+    <div class="eyebrow" style="margin-bottom:10px;">STANDARD MEDALS — AUTO-TRACKED</div>
+    <div class="grid c4">
+      ${autoMedals.map(m=>{
+        const pct = clamp(m.current/m.target*100,0,100);
+        return `
+        <div class="medal ${m.unlocked?'':'locked'}">
+          <div class="mic">${medalSVG(m.ribbon, m.unlocked, false)}</div>
+          <div class="mn">${m.name}</div>
+          <div class="md">${m.desc}</div>
+          <div class="bar gold" style="margin-top:10px;"><i style="width:${pct}%"></i></div>
+          <div class="stat-label" style="margin-top:4px;">${Math.min(m.current,m.target)} / ${m.target}</div>
+          <div class="tag" style="margin-top:8px; ${m.unlocked?'color:var(--green); border-color:var(--green);':''}">${m.unlocked?'UNLOCKED':'LOCKED'}</div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>
+  `;
+}
+
+/* ========================================================
+   SECTION: ACHIEVEMENTS — permanent record of every claimed medal
+======================================================== */
+function secAchievements(){
+  const list = state.achievements || [];
+  return `
+  <div class="pagehead"><h2>ACHIEVEMENTS</h2><div class="sub">EVERY MEDAL EVER EARNED — PERMANENT RECORD</div></div>
+  <div class="panel">
+    ${list.length ? `
+    <table>
+      <tr><th>Date</th><th>Medal</th></tr>
+      ${list.map(a=>`<tr><td>${a.date}</td><td><span style="display:inline-flex; align-items:center; gap:8px;">${a.medalImg?`<img src="${a.medalImg}" style="width:24px;height:24px;object-fit:contain;">`:medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,true)} ${esc(a.name)}</span></td></tr>`).join('')}
+    </table>` : '<div class="empty">No medals claimed yet. Head to Medals &amp; Awards to create and earn your first one.</div>'}
   </div>
   `;
 }
