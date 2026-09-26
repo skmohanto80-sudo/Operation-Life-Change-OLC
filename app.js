@@ -90,8 +90,10 @@ const DEFAULT_STATE = {
   rankOverrides:null, // null = use built-in XP thresholds; else array of 14 custom XP numbers
   customImages:{ radhaKrishna:null }, // null = use bundled default image
   ruleBookCustom:'',
-  customMedals:[], // [{id,name,requirements,connection,target,current,colors:[c1,c2,c3],medalImg,ribbonImg,timesEarned}]
-  achievements:[], // permanent log: [{id,medalId,name,date,colors,medalImg,ribbonImg}]
+  customMedals:[], // [{id,name,requirements,connection,connectionKey,connectionBaseline,target,current,colors,medalImg,ribbonImg,timesEarned}]
+  customBadges:[], // [{id,name,requirements,connection,connectionKey,connectionBaseline,target,current,colors,badgeImg,timesEarned}]
+  achievements:[], // permanent log: [{id,kind:'medal'|'badge',medalId,name,date,colors,medalImg,ribbonImg,badgeImg}]
+  ruleBookNotes:[], // [{id,date,text}] — dated amendments, replaces the old single ruleBookCustom blob
 };
 
 let state = null;
@@ -228,7 +230,14 @@ async function loadStateFor(accountId){
   }catch(e){ state = JSON.parse(JSON.stringify(DEFAULT_STATE)); }
   if(!state.streaks.screen) state.streaks.screen = {count:0,lastDate:null,_pc:0,_pd:null};
   if(!state.customMedals) state.customMedals = [];
+  if(!state.customBadges) state.customBadges = [];
   if(!state.achievements) state.achievements = [];
+  if(!state.ruleBookNotes){
+    state.ruleBookNotes = [];
+    if(state.ruleBookCustom && state.ruleBookCustom.trim()){
+      state.ruleBookNotes.push({ id: uid('note'), date: state.profile.startDate||todayStr(), text: state.ruleBookCustom.trim() });
+    }
+  }
   activeAccountId = accountId;
 }
 function saveState(){
@@ -307,7 +316,10 @@ function addGoal(){
   const xp = Number(document.getElementById('newGoalXP').value)||10;
   const when = document.getElementById('newGoalWhen').value; // 'today' | 'tomorrow'
   if(!label) return;
-  const effectiveFrom = when==='tomorrow' ? tomorrowOf(todayStr()) : null;
+  // Every new goal is pinned to the date it was actually created (or tomorrow, if
+  // scheduled ahead) — never left open-ended — so it can never leak backward into
+  // days before it existed, in History, Day Detail, or DSS.
+  const effectiveFrom = when==='tomorrow' ? tomorrowOf(todayStr()) : todayStr();
   state.goals.push({ id: uid('g'), label, xp, effectiveFrom });
   saveState(); renderSection();
 }
@@ -317,8 +329,11 @@ function editGoal(id){
   if(newLabel===null) return;
   const newXp = prompt('XP value (full completion):', g.xp);
   if(newXp===null) return;
+  const newFrom = prompt('Active from date (YYYY-MM-DD). Leave this blank ONLY if this goal has genuinely always applied — otherwise set the day it actually started, so past History stays accurate:', g.effectiveFrom||'');
+  if(newFrom===null) return;
   g.label = newLabel.trim()||g.label;
   g.xp = Number(newXp)||g.xp;
+  g.effectiveFrom = newFrom.trim() || null;
   saveState(); renderSection();
 }
 function deleteGoal(id){
@@ -471,11 +486,86 @@ function medalSVG(colors, unlocked, ribbonOnly){
 }
 
 /* ========================================================
+   TRACKED METRICS — shared "connection" engine for Medals & Badges
+   Lets a medal/badge link to a real streak or lifetime stat so it
+   can fill its bar and claim itself automatically, without ever
+   touching the real streak/XP numbers it's reading from.
+======================================================== */
+const TRACK_OPTIONS = [
+  { key:'manual', label:"Manual — I'll update it myself" },
+  { key:'streak_study', label:'Study Streak' },
+  { key:'streak_fitness', label:'Fitness Streak' },
+  { key:'streak_spiritual', label:'Spiritual Streak' },
+  { key:'streak_reading', label:'Reading Streak' },
+  { key:'streak_wakeup', label:'Wake-Up Streak' },
+  { key:'streak_habit', label:'Habit Streak (Perfect Days)' },
+  { key:'streak_screen', label:'Screen Discipline Streak' },
+  { key:'total_xp', label:'Total XP Earned' },
+  { key:'total_study_hours', label:'Total Study Hours (lifetime)' },
+  { key:'total_gripper', label:'Total Gripper Count (lifetime)' },
+  { key:'total_exercise_sessions', label:'Total Exercise Sessions Logged' },
+];
+function trackLabel(key){ return (TRACK_OPTIONS.find(o=>o.key===key)||{}).label || 'Manual'; }
+function trackedMetricValue(key){
+  switch(key){
+    case 'streak_study': return state.streaks.study.count;
+    case 'streak_fitness': return state.streaks.fitness.count;
+    case 'streak_spiritual': return state.streaks.spiritual.count;
+    case 'streak_reading': return state.streaks.reading.count;
+    case 'streak_wakeup': return state.streaks.wakeup.count;
+    case 'streak_habit': return state.streaks.habit.count;
+    case 'streak_screen': return state.streaks.screen.count;
+    case 'total_xp': return state.xp;
+    case 'total_study_hours': return (state.trackerLogs.study||[]).reduce((a,e)=>a+(Number(e.hours)||0),0);
+    case 'total_gripper': return (state.trackerLogs.exercise||[]).reduce((a,e)=>a+(Number(e.gripper)||0),0);
+    case 'total_exercise_sessions': return (state.trackerLogs.exercise||[]).length;
+    default: return null; // 'manual' or unrecognized — not auto-tracked
+  }
+}
+/* Live progress for a connected item is "how much the metric has grown since
+   the baseline" — never the metric's raw value — so claiming can reset the
+   bar without ever rewinding the real streak/XP/stat it's watching. */
+function trackedCurrent(item){
+  if(!item.connectionKey || item.connectionKey==='manual') return Number(item.current)||0;
+  const v = trackedMetricValue(item.connectionKey);
+  if(v===null) return Number(item.current)||0;
+  if(item.connectionBaseline===undefined) return 0;
+  return Math.max(0, v - item.connectionBaseline);
+}
+/* Checked on every render: auto-claims any connected medal/badge whose live
+   progress has reached its target, logs it to Achievements, then re-baselines
+   so it must grow by the target again before claiming a second time. */
+function checkAutoClaims(){
+  if(!state) return;
+  let changed = false;
+  const process = (list, kind) => (list||[]).forEach(item=>{
+    if(!item.connectionKey || item.connectionKey==='manual') return;
+    const v = trackedMetricValue(item.connectionKey);
+    if(v===null) return;
+    if(item.connectionBaseline===undefined){ item.connectionBaseline = v; changed = true; return; }
+    const progress = Math.max(0, v - item.connectionBaseline);
+    if(progress >= item.target){
+      state.achievements.unshift({
+        id: uid('ach'), kind, medalId: item.id, name: item.name, date: todayStr(),
+        colors: item.colors, medalImg: item.medalImg, ribbonImg: item.ribbonImg, badgeImg: item.badgeImg,
+      });
+      item.timesEarned = (item.timesEarned||0) + 1;
+      item.connectionBaseline = v;
+      changed = true;
+    }
+  });
+  process(state.customMedals, 'medal');
+  process(state.customBadges, 'badge');
+  if(changed) saveState();
+}
+
+/* ========================================================
    CUSTOM MEDAL SYSTEM — user-created, repeatable medals
-   Each medal has its own progress bar toward a target you set.
-   Reaching the target lets you claim it: the claim is logged
-   forever in Achievements and on the Agent Profile ribbon bar,
-   then the bar resets to 0 so the same medal can be earned again.
+   Each medal has its own progress bar toward a target you set —
+   either updated by hand, or auto-tracked from a real streak/stat.
+   Reaching the target claims it: the claim is logged forever in
+   Achievements and on the Agent Profile ribbon bar, then the bar
+   resets to 0 so the same medal can be earned again.
 ======================================================== */
 const DEFAULT_MEDAL_COLORS = ['#6753b7','#d779f1','#6753b7'];
 let medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null };
@@ -514,6 +604,7 @@ function saveMedalForm(){
   if(!name){ alert('Give the medal a name first.'); return; }
   const requirements = document.getElementById('mf_requirements').value.trim();
   const connection = document.getElementById('mf_connection').value.trim();
+  const connectionKey = document.getElementById('mf_connectionKey').value;
   const target = Math.max(1, Number(document.getElementById('mf_target').value)||1);
   const colors = [
     document.getElementById('mf_color1').value || DEFAULT_MEDAL_COLORS[0],
@@ -522,10 +613,18 @@ function saveMedalForm(){
   ];
   if(medalForm.editId){
     const m = state.customMedals.find(x=>x.id===medalForm.editId);
-    if(m) Object.assign(m, { name, requirements, connection, target, colors, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg });
+    if(m){
+      const keyChanged = (m.connectionKey||'manual') !== connectionKey;
+      Object.assign(m, { name, requirements, connection, connectionKey, target, colors, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg });
+      if(keyChanged){
+        m.connectionBaseline = connectionKey==='manual' ? undefined : trackedMetricValue(connectionKey);
+        if(connectionKey==='manual') m.current = 0;
+      }
+    }
   } else {
+    const connectionBaseline = connectionKey!=='manual' ? trackedMetricValue(connectionKey) : undefined;
     state.customMedals.push({
-      id: uid('medal'), name, requirements, connection, target, current:0,
+      id: uid('medal'), name, requirements, connection, connectionKey, connectionBaseline, target, current:0,
       colors, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg,
       timesEarned:0, createdDate: todayStr(),
     });
@@ -550,15 +649,22 @@ function setMedalProgress(id, val){
   m.current = Math.max(0, Number(val)||0);
   saveState(); renderSection();
 }
+function resetMedalTracking(id){
+  const m = state.customMedals.find(x=>x.id===id); if(!m) return;
+  if(m.connectionKey && m.connectionKey!=='manual') m.connectionBaseline = trackedMetricValue(m.connectionKey);
+  else m.current = 0;
+  saveState(); renderSection();
+}
 
-/* Claiming: logs a permanent Achievement entry (with a snapshot of the medal's
-   look), adds one to timesEarned so the ribbon bar can show it, then resets
-   the medal's own progress bar back to 0 so it can be worked toward again. */
+/* Manual claiming (connected medals auto-claim via checkAutoClaims instead).
+   Logs a permanent Achievement entry with a snapshot of the medal's look,
+   adds one to timesEarned so the ribbon bar can show it, then resets the
+   medal's own progress bar back to 0 so it can be worked toward again. */
 function claimMedal(id){
   const m = state.customMedals.find(x=>x.id===id); if(!m) return;
-  if(m.current < m.target) return;
+  if(trackedCurrent(m) < m.target) return;
   state.achievements.unshift({
-    id: uid('ach'), medalId: m.id, name: m.name, date: todayStr(),
+    id: uid('ach'), kind:'medal', medalId: m.id, name: m.name, date: todayStr(),
     colors: m.colors, medalImg: m.medalImg, ribbonImg: m.ribbonImg,
   });
   m.timesEarned = (m.timesEarned||0) + 1;
@@ -570,6 +676,7 @@ function medalFormHTML(){
   const editing = !!medalForm.editId;
   const m = editing ? state.customMedals.find(x=>x.id===medalForm.editId) : null;
   const colors = (m && m.colors) || DEFAULT_MEDAL_COLORS;
+  const curKey = (m && m.connectionKey) || 'manual';
   return `
   <div class="panel" id="medalFormPanel" style="margin-top:16px; border-color:var(--border-strong);">
     <h3><span class="ic">🎖</span>${editing?'EDIT MEDAL':'ADD MEDAL'}</h3>
@@ -578,7 +685,11 @@ function medalFormHTML(){
       <div class="field"><label class="f">Target (bar completes at this number)</label><input type="number" id="mf_target" min="1" value="${m?m.target:30}"></div>
     </div>
     <div class="field"><label class="f">Requirements — how is it earned?</label><textarea id="mf_requirements" rows="2" placeholder="e.g. 30 days without a single missed study session">${m?esc(m.requirements||''):''}</textarea></div>
-    <div class="field"><label class="f">Connection — what is it linked to? (optional)</label><input type="text" id="mf_connection" value="${m?esc(m.connection||''):''}" placeholder="e.g. Study Streak, Screen Time Discipline, Gripper Training"></div>
+
+    <div class="field"><label class="f">Connection — link to a streak or stat for auto-claim</label>
+      <select id="mf_connectionKey">${TRACK_OPTIONS.map(o=>`<option value="${o.key}" ${curKey===o.key?'selected':''}>${o.label}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label class="f">Note <span style="font-weight:400; color:var(--dim);">(optional — shown as a tag on the card)</span></label><input type="text" id="mf_connection" value="${m?esc(m.connection||''):''}" placeholder="e.g. For staying disciplined all month"></div>
 
     <label class="f">Ribbon Colors <span style="font-weight:400; color:var(--dim);">(used when no custom image is uploaded)</span></label>
     <div style="display:flex; gap:10px; margin-bottom:12px;">
@@ -607,6 +718,135 @@ function medalFormHTML(){
   </div>`;
 }
 
+/* ========================================================
+   CUSTOM BADGE SYSTEM — Side Arm Badges, image-only version of
+   the medal system above (no ribbon). Same progress/connection/
+   auto-claim mechanics, its own permanent Achievements entries.
+======================================================== */
+let badgeForm = { open:false, editId:null, badgeImg:null };
+
+function badgeGraphic(b, size){
+  size = size || 60;
+  if(b.badgeImg) return `<img src="${b.badgeImg}" style="width:${size}px; height:${size}px; object-fit:contain; border-radius:10px;">`;
+  return medalSVG((b.colors && b.colors.length===3) ? b.colors : DEFAULT_MEDAL_COLORS, true, false);
+}
+
+function openAddBadgeForm(){ badgeForm = { open:true, editId:null, badgeImg:null }; renderSection(); setTimeout(()=>document.getElementById('badgeFormPanel')?.scrollIntoView({behavior:'smooth', block:'center'}), 60); }
+function openEditBadgeForm(id){
+  const b = state.customBadges.find(x=>x.id===id); if(!b) return;
+  badgeForm = { open:true, editId:id, badgeImg:b.badgeImg||null };
+  renderSection();
+  setTimeout(()=>document.getElementById('badgeFormPanel')?.scrollIntoView({behavior:'smooth', block:'center'}), 60);
+}
+function closeBadgeForm(){ badgeForm = { open:false, editId:null, badgeImg:null }; renderSection(); }
+
+async function uploadBadgeFormImage(input){
+  const file = input.files && input.files[0]; if(!file) return;
+  try{ badgeForm.badgeImg = await fileToCompressedDataURL(file, 300, 0.9); renderSection(); }
+  catch(e){ alert('Could not read that image — try a different file.'); }
+}
+function clearBadgeFormImage(){ badgeForm.badgeImg = null; renderSection(); }
+
+function saveBadgeForm(){
+  const name = document.getElementById('bf_name').value.trim();
+  if(!name){ alert('Give the badge a name first.'); return; }
+  const requirements = document.getElementById('bf_requirements').value.trim();
+  const connection = document.getElementById('bf_connection').value.trim();
+  const connectionKey = document.getElementById('bf_connectionKey').value;
+  const target = Math.max(1, Number(document.getElementById('bf_target').value)||1);
+  const colors = [
+    document.getElementById('bf_color1').value || DEFAULT_MEDAL_COLORS[0],
+    document.getElementById('bf_color2').value || DEFAULT_MEDAL_COLORS[1],
+    document.getElementById('bf_color3').value || DEFAULT_MEDAL_COLORS[2],
+  ];
+  if(badgeForm.editId){
+    const b = state.customBadges.find(x=>x.id===badgeForm.editId);
+    if(b){
+      const keyChanged = (b.connectionKey||'manual') !== connectionKey;
+      Object.assign(b, { name, requirements, connection, connectionKey, target, colors, badgeImg: badgeForm.badgeImg });
+      if(keyChanged){
+        b.connectionBaseline = connectionKey==='manual' ? undefined : trackedMetricValue(connectionKey);
+        if(connectionKey==='manual') b.current = 0;
+      }
+    }
+  } else {
+    const connectionBaseline = connectionKey!=='manual' ? trackedMetricValue(connectionKey) : undefined;
+    state.customBadges.push({
+      id: uid('badge'), name, requirements, connection, connectionKey, connectionBaseline, target, current:0,
+      colors, badgeImg: badgeForm.badgeImg, timesEarned:0, createdDate: todayStr(),
+    });
+  }
+  closeBadgeForm();
+  saveState(); renderSection();
+}
+
+function deleteCustomBadge(id){
+  if(!confirm('Delete this badge? Its permanent record in Achievements is kept, but the badge card and its live progress will be removed.')) return;
+  state.customBadges = state.customBadges.filter(b=>b.id!==id);
+  saveState(); renderSection();
+}
+function bumpBadgeProgress(id, delta){
+  const b = state.customBadges.find(x=>x.id===id); if(!b) return;
+  b.current = Math.max(0, (Number(b.current)||0) + delta);
+  saveState(); renderSection();
+}
+function setBadgeProgress(id, val){
+  const b = state.customBadges.find(x=>x.id===id); if(!b) return;
+  b.current = Math.max(0, Number(val)||0);
+  saveState(); renderSection();
+}
+function resetBadgeTracking(id){
+  const b = state.customBadges.find(x=>x.id===id); if(!b) return;
+  if(b.connectionKey && b.connectionKey!=='manual') b.connectionBaseline = trackedMetricValue(b.connectionKey);
+  else b.current = 0;
+  saveState(); renderSection();
+}
+function claimBadge(id){
+  const b = state.customBadges.find(x=>x.id===id); if(!b) return;
+  if(trackedCurrent(b) < b.target) return;
+  state.achievements.unshift({ id: uid('ach'), kind:'badge', medalId: b.id, name: b.name, date: todayStr(), colors: b.colors, badgeImg: b.badgeImg });
+  b.timesEarned = (b.timesEarned||0) + 1;
+  b.current = 0;
+  saveState(); renderSection();
+}
+
+function badgeFormHTML(){
+  const editing = !!badgeForm.editId;
+  const b = editing ? state.customBadges.find(x=>x.id===badgeForm.editId) : null;
+  const colors = (b && b.colors) || DEFAULT_MEDAL_COLORS;
+  const curKey = (b && b.connectionKey) || 'manual';
+  return `
+  <div class="panel" id="badgeFormPanel" style="margin-top:16px; border-color:var(--border-strong);">
+    <h3><span class="ic">◉</span>${editing?'EDIT BADGE':'ADD BADGE'}</h3>
+    <div class="grid c2">
+      <div class="field"><label class="f">Badge Name</label><input type="text" id="bf_name" value="${b?esc(b.name):''}" placeholder="e.g. Marksman Badge"></div>
+      <div class="field"><label class="f">Target (bar completes at this number)</label><input type="number" id="bf_target" min="1" value="${b?b.target:30}"></div>
+    </div>
+    <div class="field"><label class="f">Requirements — how is it earned?</label><textarea id="bf_requirements" rows="2" placeholder="e.g. 30 days of excelling in this field">${b?esc(b.requirements||''):''}</textarea></div>
+
+    <div class="field"><label class="f">Connection — link to a streak or stat for auto-claim</label>
+      <select id="bf_connectionKey">${TRACK_OPTIONS.map(o=>`<option value="${o.key}" ${curKey===o.key?'selected':''}>${o.label}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label class="f">Note <span style="font-weight:400; color:var(--dim);">(optional — shown as a tag on the card)</span></label><input type="text" id="bf_connection" value="${b?esc(b.connection||''):''}" placeholder="e.g. Marksmanship training"></div>
+
+    <label class="f">Badge Colors <span style="font-weight:400; color:var(--dim);">(used when no custom image is uploaded)</span></label>
+    <div style="display:flex; gap:10px; margin-bottom:12px;">
+      <input type="color" id="bf_color1" value="${colors[0]}">
+      <input type="color" id="bf_color2" value="${colors[1]}">
+      <input type="color" id="bf_color3" value="${colors[2]}">
+    </div>
+
+    <label class="f">Badge Image <span style="font-weight:400; color:var(--dim);">(optional — image only, no ribbon for badges)</span></label>
+    ${badgeForm.badgeImg ? `<div style="margin-bottom:6px; display:flex; align-items:center; gap:8px;"><img src="${badgeForm.badgeImg}" style="width:50px; height:50px; object-fit:contain;"><button class="btn ghost sm" onclick="clearBadgeFormImage()">✕ Remove</button></div>` : ''}
+    <label class="btn ghost sm" style="cursor:pointer;">Upload Badge Image<input type="file" accept="image/*" style="display:none;" onchange="uploadBadgeFormImage(this)"></label>
+
+    <div style="margin-top:14px; display:flex; gap:8px;">
+      <button class="btn" onclick="saveBadgeForm()">${editing?'Save Changes':'Create Badge'}</button>
+      <button class="btn ghost" onclick="closeBadgeForm()">Cancel</button>
+    </div>
+  </div>`;
+}
+
 /* ---------- rollover ---------- */
 function rollover(){ ensureDay(todayStr()); saveState(); }
 
@@ -617,6 +857,7 @@ function go(sec){
   currentSection = sec;
   editingTracker = { name:null, index:null };
   if(sec!=='medals') medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null };
+  if(sec!=='badges') badgeForm = { open:false, editId:null, badgeImg:null };
   if(sec==='rulebook') fbIndex = 0;
   document.querySelectorAll('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.sec===sec));
   renderSection();
@@ -641,6 +882,7 @@ function openRKModal(){ document.getElementById('rkModal').style.display = 'flex
 function closeRKModal(){ document.getElementById('rkModal').style.display = 'none'; }
 
 function renderSection(){
+  checkAutoClaims();
   const map = { home:secHome, dashboard:secDashboard, profile:secProfile, mission:secMission,
     streaks:secStreaks, daily:secDaily, trackers:secTrackers, rank:secRank, medals:secMedals,
     achievements:secAchievements, badges:secBadges, rulebook:secRulebook, archives:secArchives };
@@ -874,6 +1116,26 @@ function secProfile(){
     </div>
     <p class="stat-label" style="margin-top:12px;">Each Agent ID on this device keeps completely separate data. Use the 🔒 button in the top bar to switch to another ID or lock the app.</p>
     <button class="btn ghost sm" style="margin-top:8px;" onclick="lockApp()">Switch Account / Lock</button>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <h3><span class="ic">☁</span>CLOUD SYNC</h3>
+    ${API_BASE_URL ? `
+      <div class="stat-label">Backend: <span class="mono">${esc(API_BASE_URL)}</span></div>
+      <div class="stat-label" style="margin-top:6px; color:${syncStatus.ok===false?'var(--danger)':syncStatus.ok===true?'var(--green)':'var(--dim)'};">
+        ${syncStatus.ok===true ? '✓ Synced'+(syncStatus.at?(' at '+new Date(syncStatus.at).toLocaleTimeString()):'') : syncStatus.ok===false ? '⚠ Last sync failed — your data is safe on this device and will retry automatically.' : 'Not synced yet this session.'}
+      </div>
+      <button class="btn ghost sm" style="margin-top:8px;" onclick="manualSyncNow()">Sync Now</button>
+      <p class="stat-label" style="margin-top:10px;">On your phone: open the app, choose "Create ID" (or "Login"), enter the exact same Codename + Code ID, and this same data will load there.</p>
+    ` : `
+      <p class="stat-label">Right now OLC only saves to this device's browser. To see the same data on your phone too, you need a small free backend:</p>
+      <ol style="font-size:13px; color:var(--dim); padding-left:18px; margin:8px 0; line-height:1.7;">
+        <li>Deploy the <span class="mono">backend/</span> folder (already in your project zip) to Render.com — it's free. Full steps are in <span class="mono">backend/README.md</span>.</li>
+        <li>You'll get a URL like <span class="mono">https://olc-backend.onrender.com</span>.</li>
+        <li>Send me that URL and I'll wire it into the app for you — or set it yourself in <span class="mono">frontend/app.js</span> at the line <span class="mono">const API_BASE_URL = ''</span>.</li>
+        <li>Reload the app, then on your phone use the exact same Codename + Code ID via "Create ID" or "Login" to pull this same account there.</li>
+      </ol>
+    `}
   </div>
   `;
 }
@@ -1354,29 +1616,37 @@ function secMedals(){
 
   <div class="panel">
     <button class="btn" onclick="openAddMedalForm()">+ Add Medal</button>
-    <p class="stat-label" style="margin-top:10px; line-height:1.6;">Create your own medal: name it, set the requirements to earn it, note what it's connected to, and pick a target number. Track the bar with +1 / -1 or by typing a number directly. Once the bar is full, Claim it — the claim is stored forever in Achievements and its ribbon joins your Agent Profile. Claiming resets the bar to 0 so the same medal can be earned all over again.</p>
+    <p class="stat-label" style="margin-top:10px; line-height:1.6;">Create your own medal: name it, set the requirements to earn it, and pick a target. Either track the bar yourself with +1 / -1, or set Connection to link it to a real streak or lifetime stat — it will then fill and claim itself automatically. Once the bar is full, it's logged forever in Achievements and its ribbon joins your Agent Profile, then the bar resets to 0 so the same medal can be earned all over again.</p>
   </div>
 
   ${medalForm.open ? medalFormHTML() : ''}
 
   <div class="grid c3" style="margin-top:16px;">
     ${medals.length ? medals.map(m=>{
-      const pct = clamp((m.current/m.target)*100,0,100);
-      const ready = m.current >= m.target;
+      const cur = trackedCurrent(m);
+      const pct = clamp((cur/m.target)*100,0,100);
+      const ready = cur >= m.target;
+      const auto = m.connectionKey && m.connectionKey!=='manual';
       return `
       <div class="medal" id="medalcard_${m.id}" style="${ready?'border-color:var(--gold); box-shadow:0 0 14px color-mix(in srgb, var(--gold) 35%, transparent);':''}">
         <div class="mic">${medalGraphic(m,60)}</div>
         <div class="mn">${esc(m.name)}</div>
         ${m.requirements?`<div class="md">${esc(m.requirements)}</div>`:''}
-        ${m.connection?`<div class="tag" style="margin-top:6px;">Connected: ${esc(m.connection)}</div>`:''}
+        <div class="tag" style="margin-top:6px;">🔗 ${auto?('Auto: '+esc(trackLabel(m.connectionKey))):'Manual tracking'}</div>
+        ${m.connection?`<div class="tag" style="margin-top:4px;">${esc(m.connection)}</div>`:''}
         <div class="bar gold" style="margin-top:10px;"><i style="width:${pct}%"></i></div>
-        <div class="stat-label" style="margin-top:4px;">${m.current} / ${m.target}${m.timesEarned?` · Earned ${m.timesEarned}×`:''}</div>
+        <div class="stat-label" style="margin-top:4px;">${Number.isInteger(cur)?cur:cur.toFixed(1)} / ${m.target}${m.timesEarned?` · Earned ${m.timesEarned}×`:''}</div>
+        ${auto ? `
+        <div class="stat-label" style="margin-top:6px;">Fills automatically — claims itself at target.</div>
+        <button class="btn ghost sm" style="margin-top:6px;" onclick="resetMedalTracking('${m.id}')">Reset Progress</button>
+        ` : `
         <div style="display:flex; gap:6px; justify-content:center; align-items:center; margin-top:8px; flex-wrap:wrap;">
           <button class="btn ghost sm" onclick="bumpMedalProgress('${m.id}',-1)">-1</button>
           <input type="number" style="width:60px; text-align:center;" value="${m.current}" onchange="setMedalProgress('${m.id}', this.value)">
           <button class="btn ghost sm" onclick="bumpMedalProgress('${m.id}',1)">+1</button>
         </div>
         <button class="btn ${ready?'':'ghost'} sm" style="margin-top:8px; width:100%; ${ready?'':'opacity:.5;'}" ${ready?`onclick="claimMedal('${m.id}')"`:'disabled'}>${ready?'🎖 Claim Medal':'Locked'}</button>
+        `}
         <div style="display:flex; gap:6px; justify-content:center; margin-top:6px;">
           <button class="btn ghost sm" onclick="openEditMedalForm('${m.id}')">Edit</button>
           <button class="btn ghost sm" onclick="deleteCustomMedal('${m.id}')">Delete</button>
@@ -1406,51 +1676,98 @@ function secMedals(){
 }
 
 /* ========================================================
-   SECTION: ACHIEVEMENTS — permanent record of every claimed medal
+   SECTION: ACHIEVEMENTS — permanent record of every claimed medal/badge
 ======================================================== */
 function secAchievements(){
   const list = state.achievements || [];
   return `
-  <div class="pagehead"><h2>ACHIEVEMENTS</h2><div class="sub">EVERY MEDAL EVER EARNED — PERMANENT RECORD</div></div>
+  <div class="pagehead"><h2>ACHIEVEMENTS</h2><div class="sub">EVERY MEDAL &amp; BADGE EVER EARNED — PERMANENT RECORD</div></div>
   <div class="panel">
     ${list.length ? `
     <table>
-      <tr><th>Date</th><th>Medal</th></tr>
-      ${list.map(a=>`<tr><td>${a.date}</td><td><span style="display:inline-flex; align-items:center; gap:8px;">${a.medalImg?`<img src="${a.medalImg}" style="width:24px;height:24px;object-fit:contain;">`:medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,true)} ${esc(a.name)}</span></td></tr>`).join('')}
-    </table>` : '<div class="empty">No medals claimed yet. Head to Medals &amp; Awards to create and earn your first one.</div>'}
+      <tr><th>Date</th><th>Type</th><th>Name</th></tr>
+      ${list.map(a=>`<tr><td>${a.date}</td><td>${a.kind==='badge'?'Badge':'Medal'}</td><td><span style="display:inline-flex; align-items:center; gap:8px;">${a.kind==='badge' ? (a.badgeImg?`<img src="${a.badgeImg}" style="width:24px;height:24px;object-fit:contain;">`:medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,false)) : (a.medalImg?`<img src="${a.medalImg}" style="width:24px;height:24px;object-fit:contain;">`:medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,true))} ${esc(a.name)}</span></td></tr>`).join('')}
+    </table>` : '<div class="empty">No medals or badges claimed yet. Head to Medals &amp; Awards or the Badge System to create and earn your first one.</div>'}
   </div>
   `;
 }
 
 /* ========================================================
-   SECTION: BADGES
+   SECTION: BADGES (Side Arm Badge System)
 ======================================================== */
 function secBadges(){
-  const badges = getBadges();
+  const badges = state.customBadges || [];
+  const autoBadges = getBadges();
   return `
-  <div class="pagehead"><h2>SIDE ARM BADGE SYSTEM</h2><div class="sub">DSS · FITNESS · SKILLS SPECIALIZATION</div></div>
-  <div class="grid c3">
-    ${badges.map(b=>{
-      const pct = clamp(b.current/b.target*100,0,100);
+  <div class="pagehead"><h2>SIDE ARM BADGE SYSTEM</h2><div class="sub">DESIGN YOUR OWN SPECIALIZATIONS</div></div>
+
+  <div class="panel">
+    <button class="btn" onclick="openAddBadgeForm()">+ Add Badge</button>
+    <p class="stat-label" style="margin-top:10px; line-height:1.6;">Same idea as Medals, but image-only — no ribbon. Name it, set requirements and a target, and optionally connect it to a real streak or stat for auto-claim. Claims are logged forever in Achievements and the bar resets so it can be earned again.</p>
+  </div>
+
+  ${badgeForm.open ? badgeFormHTML() : ''}
+
+  <div class="grid c3" style="margin-top:16px;">
+    ${badges.length ? badges.map(b=>{
+      const cur = trackedCurrent(b);
+      const pct = clamp((cur/b.target)*100,0,100);
+      const ready = cur >= b.target;
+      const auto = b.connectionKey && b.connectionKey!=='manual';
       return `
-      <div class="badgechip ${b.unlocked?'':'locked'}" style="flex-direction:column; align-items:stretch;">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <div class="bi" style="border-radius:6px; width:auto; height:auto; padding:4px;">${medalSVG(b.ribbon, b.unlocked, true)}</div>
-          <div>
-            <div class="bn" style="font-family:'Orbitron'; font-size:12px;">${b.name}</div>
-            <div class="stat-label">${b.desc}</div>
-          </div>
-        </div>
+      <div class="medal" id="badgecard_${b.id}" style="${ready?'border-color:var(--gold); box-shadow:0 0 14px color-mix(in srgb, var(--gold) 35%, transparent);':''}">
+        <div class="mic">${badgeGraphic(b,60)}</div>
+        <div class="mn">${esc(b.name)}</div>
+        ${b.requirements?`<div class="md">${esc(b.requirements)}</div>`:''}
+        <div class="tag" style="margin-top:6px;">🔗 ${auto?('Auto: '+esc(trackLabel(b.connectionKey))):'Manual tracking'}</div>
+        ${b.connection?`<div class="tag" style="margin-top:4px;">${esc(b.connection)}</div>`:''}
         <div class="bar" style="margin-top:10px;"><i style="width:${pct}%"></i></div>
-        <div class="stat-label" style="margin-top:4px;">${Math.min(b.current,b.target)} / ${b.target}</div>
+        <div class="stat-label" style="margin-top:4px;">${Number.isInteger(cur)?cur:cur.toFixed(1)} / ${b.target}${b.timesEarned?` · Earned ${b.timesEarned}×`:''}</div>
+        ${auto ? `
+        <div class="stat-label" style="margin-top:6px;">Fills automatically — claims itself at target.</div>
+        <button class="btn ghost sm" style="margin-top:6px;" onclick="resetBadgeTracking('${b.id}')">Reset Progress</button>
+        ` : `
+        <div style="display:flex; gap:6px; justify-content:center; align-items:center; margin-top:8px; flex-wrap:wrap;">
+          <button class="btn ghost sm" onclick="bumpBadgeProgress('${b.id}',-1)">-1</button>
+          <input type="number" style="width:60px; text-align:center;" value="${b.current}" onchange="setBadgeProgress('${b.id}', this.value)">
+          <button class="btn ghost sm" onclick="bumpBadgeProgress('${b.id}',1)">+1</button>
+        </div>
+        <button class="btn ${ready?'':'ghost'} sm" style="margin-top:8px; width:100%; ${ready?'':'opacity:.5;'}" ${ready?`onclick="claimBadge('${b.id}')"`:'disabled'}>${ready?'◉ Claim Badge':'Locked'}</button>
+        `}
+        <div style="display:flex; gap:6px; justify-content:center; margin-top:6px;">
+          <button class="btn ghost sm" onclick="openEditBadgeForm('${b.id}')">Edit</button>
+          <button class="btn ghost sm" onclick="deleteCustomBadge('${b.id}')">Delete</button>
+        </div>
       </div>`;
-    }).join('')}
+    }).join('') : '<div class="empty" style="grid-column:1/-1;">No badges yet — tap "+ Add Badge" above to create your first one.</div>'}
+  </div>
+
+  <div style="margin-top:26px; border-top:1px solid var(--border); padding-top:16px;">
+    <div class="eyebrow" style="margin-bottom:10px;">STANDARD BADGES — AUTO-TRACKED</div>
+    <div class="grid c3">
+      ${autoBadges.map(b=>{
+        const pct = clamp(b.current/b.target*100,0,100);
+        return `
+        <div class="badgechip ${b.unlocked?'':'locked'}" style="flex-direction:column; align-items:stretch;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <div class="bi" style="border-radius:6px; width:auto; height:auto; padding:4px;">${medalSVG(b.ribbon, b.unlocked, true)}</div>
+            <div>
+              <div class="bn" style="font-family:'Orbitron'; font-size:12px;">${b.name}</div>
+              <div class="stat-label">${b.desc}</div>
+            </div>
+          </div>
+          <div class="bar" style="margin-top:10px;"><i style="width:${pct}%"></i></div>
+          <div class="stat-label" style="margin-top:4px;">${Math.min(b.current,b.target)} / ${b.target}</div>
+        </div>`;
+      }).join('')}
+    </div>
   </div>
   <div class="panel" style="margin-top:16px;">
-    <p style="color:var(--dim); font-size:13px;">Earn a Side Arm Badge by excelling in that field for 30+ days, per the OLC Rule Book.</p>
+    <p style="color:var(--dim); font-size:13px;">Earn a Standard Side Arm Badge by excelling in that field for 30+ days, per the OLC Rule Book.</p>
   </div>
   `;
 }
+
 
 /* ========================================================
    SECTION: RULE BOOK — real page-flip book (actual PDF pages)
@@ -1460,6 +1777,7 @@ let fbAnimating = false;
 
 function secRulebook(){
   const pages = rbPages();
+  const notes = (state.ruleBookNotes||[]).slice().sort((a,b)=>a.date<b.date?1:-1);
   return `
   <div class="pagehead"><h2>THE RULE BOOK</h2><div class="sub">THE OFFICIAL OPERATING MANUAL OF AGENT SK &amp; OLC — v1.0</div></div>
   <div class="panel flipbook-wrap">
@@ -1469,7 +1787,12 @@ function secRulebook(){
       <div class="fb-pagenum" id="fbPageNum">Page 1 / ${pages.length}</div>
       <button class="fb-navbtn" id="fbNext" onclick="fbTurn(1)">›</button>
     </div>
-    <div class="idcard-hint" style="margin-top:6px;">CLICK THE ARROWS TO TURN PAGES</div>
+    <div style="display:flex; gap:8px; justify-content:center; align-items:center; margin-top:10px;">
+      <label class="stat-label" style="margin:0;">Jump to page</label>
+      <input type="number" id="fbJump" min="1" max="${pages.length}" style="width:70px; text-align:center;" placeholder="#">
+      <button class="btn ghost sm" onclick="fbJumpTo()">Go</button>
+    </div>
+    <div class="idcard-hint" style="margin-top:6px;">CLICK THE ARROWS, USE ← / → KEYS, OR JUMP TO A PAGE NUMBER</div>
     <div style="display:flex; gap:8px; justify-content:center; margin-top:14px; flex-wrap:wrap;">
       <label class="btn ghost sm" style="cursor:pointer;">Upload Page<input type="file" accept="image/*" style="display:none;" onchange="uploadRulebookPage(this)"></label>
       <button class="btn ghost sm" onclick="deleteRulebookPage(fbIndex)">Delete This Page</button>
@@ -1478,9 +1801,19 @@ function secRulebook(){
     <div class="stat-label" style="text-align:center; margin-top:8px;">Uploaded pages replace or extend the book — delete originals or add your own, it's yours to edit.</div>
   </div>
   <div class="panel" style="margin-top:16px;">
-    <h3><span class="ic">✎</span>ADDITIONAL PERSONAL NOTES</h3>
-    <textarea id="rb_custom" rows="5" placeholder="Add your own amendments to the constitution...">${esc(state.ruleBookCustom)}</textarea>
-    <button class="btn sm" style="margin-top:8px;" onclick="saveCustomRules()">Save</button>
+    <h3><span class="ic">✎</span>PERSONAL AMENDMENTS</h3>
+    <textarea id="rb_custom" rows="4" placeholder="Add a new amendment to the constitution, dated today..."></textarea>
+    <button class="btn sm" style="margin-top:8px;" onclick="addRuleBookNote()">Add Amendment</button>
+    <div style="margin-top:14px;">
+      ${notes.length ? notes.map(n=>`
+      <div class="timeline-item">
+        <div style="flex:1;">
+          <div class="mono" style="color:var(--cyan); font-size:12px;">${n.date}</div>
+          <div>${esc(n.text)}</div>
+        </div>
+        <button class="btn ghost sm" onclick="deleteRuleBookNote('${n.id}')">🗑</button>
+      </div>`).join('') : '<div class="empty">No amendments yet</div>'}
+    </div>
   </div>
   `;
 }
@@ -1495,6 +1828,19 @@ function fbRenderBase(){
   document.getElementById('fbPrev').disabled = fbIndex<=0;
   document.getElementById('fbNext').disabled = fbIndex>=pages.length-1;
 }
+function fbJumpTo(){
+  const pages = rbPages();
+  const val = Number(document.getElementById('fbJump').value);
+  if(!val || val<1 || val>pages.length) return;
+  fbIndex = val-1;
+  fbRenderBase();
+}
+document.addEventListener('keydown', (e)=>{
+  if(currentSection!=='rulebook') return;
+  if(e.target && ['TEXTAREA','INPUT'].includes(e.target.tagName)) return;
+  if(e.key==='ArrowLeft') fbTurn(-1);
+  else if(e.key==='ArrowRight') fbTurn(1);
+});
 function fbTurn(dir){
   if(fbAnimating) return;
   const pages = rbPages();
@@ -1541,7 +1887,16 @@ function resetRulebookToDefault(){
   fbIndex = 0;
   saveState(); renderSection();
 }
-function saveCustomRules(){ state.ruleBookCustom = document.getElementById('rb_custom').value; saveState(); renderSection(); }
+function addRuleBookNote(){
+  const text = document.getElementById('rb_custom').value.trim();
+  if(!text) return;
+  state.ruleBookNotes.unshift({ id: uid('note'), date: todayStr(), text });
+  saveState(); renderSection();
+}
+function deleteRuleBookNote(id){
+  state.ruleBookNotes = state.ruleBookNotes.filter(n=>n.id!==id);
+  saveState(); renderSection();
+}
 
 /* ========================================================
    SECTION: ARCHIVES & HISTORY
@@ -1590,14 +1945,17 @@ function secArchives(){
   <div class="panel">
     <h3><span class="ic">🗄</span>DAILY REPORTS <span style="font-weight:400; color:var(--dim); font-size:11px;">(last 2 months · click a row for full detail)</span></h3>
     <table>
-      <tr><th>Date</th><th>DSS</th><th>Goals</th><th>Woke On Time</th><th>EOD Logged</th></tr>
+      <tr><th>Date</th><th>DSS</th><th>Goals</th><th>Woke On Time</th><th>Water</th><th>Screen</th><th>EOD Logged</th></tr>
       ${dates.length ? dates.slice(0,62).map(d=>{
         const day = state.dailyLogs[d];
         const activeGoals = goalsForDate(d);
         const done = activeGoals.filter(g=>goalStatus(day,g.id)==='full').length;
         const hasEod = day.eod.well || day.eod.failed || day.eod.learned || day.eod.tomorrow;
-        return `<tr id="hrow-${d}" style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${activeGoals.length}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
-      }).join('') : '<tr><td colspan="5" class="empty">No history yet — complete your first day</td></tr>'}
+        const waterL = day.waterL||0;
+        const scrMin = (day.screen&&day.screen.totalMin)||0;
+        const scrOver = scrMin>0 && scrMin>state.settings.screenLimit;
+        return `<tr id="hrow-${d}" style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${activeGoals.length}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${waterL?waterL+'L':'—'}</td><td style="${scrMin?(scrOver?'color:var(--danger);':'color:var(--green);'):''}">${scrMin?scrMin+'m':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">No history yet — complete your first day</td></tr>'}
     </table>
   </div>
 
@@ -1761,6 +2119,7 @@ function openDayDetail(date){
   document.getElementById('dayDetailBody').innerHTML = `
     <h3 style="color:var(--lavender);">${fmtDateLong(date)}</h3>
     <div class="stat-label" style="margin:6px 0 14px;">DSS: ${getDSS(date)} / 100 &nbsp;·&nbsp; Woke On Time: ${day.wokeOnTime?'✓':'—'} &nbsp;·&nbsp; Reading: ${day.readingDone?'✓':'—'}</div>
+    <div class="stat-label" style="margin:0 0 14px;">Water: ${day.waterL||0}L / ${state.settings.waterGoal}L &nbsp;·&nbsp; Screen Time: ${(day.screen&&day.screen.totalMin)||0} / ${state.settings.screenLimit} min</div>
     <h3 style="font-size:13px;">GOALS</h3>
     ${goalsHtml}
     <h3 style="font-size:13px; margin-top:14px;">RATINGS</h3>
@@ -1811,11 +2170,19 @@ async function apiLogin(codename, codeid){
     return await res.json();
   }catch(e){ return null; }
 }
+let syncStatus = { checked:false, ok:null, at:null };
 async function apiSaveState(accountId, stateObj){
   if(!API_BASE_URL || !accountId) return;
   try{
-    await fetch(API_BASE_URL+'/api/state/'+accountId, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(stateObj) });
-  }catch(e){ /* offline — local copy already saved */ }
+    const res = await fetch(API_BASE_URL+'/api/state/'+accountId, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(stateObj) });
+    syncStatus = { checked:true, ok: res.ok, at: new Date().toISOString() };
+  }catch(e){ syncStatus = { checked:true, ok:false, at: new Date().toISOString() }; }
+  if(currentSection==='profile') renderSection();
+}
+async function manualSyncNow(){
+  if(!API_BASE_URL){ alert('No cloud backend is connected yet — see the Cloud Sync panel below for setup steps.'); return; }
+  await apiSaveState(activeAccountId, state);
+  renderSection();
 }
 
 /* Reconciles a local account record with the backend's canonical account id.

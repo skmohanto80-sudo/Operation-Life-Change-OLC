@@ -1,0 +1,14 @@
+{
+  "name": "olc-backend",
+  "version": "1.0.0",
+  "description": "Operation Life Change - backend API + admin viewer",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}
