@@ -2152,7 +2152,7 @@ function showAuthTab(tab){
    accounts + data. The app always keeps a local copy too, so it still
    works if the backend is briefly unreachable.
 ======================================================== */
-const API_BASE_URL = ''; // e.g. 'https://your-olc-backend.onrender.com'
+const API_BASE_URL = 'https://operation-life-change-olc.onrender.com/'; // e.g. 'https://your-olc-backend.onrender.com'
 
 async function apiSignup(codename, codeid){
   if(!API_BASE_URL) return null;
