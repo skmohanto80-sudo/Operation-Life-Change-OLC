@@ -2152,31 +2152,44 @@ function showAuthTab(tab){
    accounts + data. The app always keeps a local copy too, so it still
    works if the backend is briefly unreachable.
 ======================================================== */
-const API_BASE_URL = 'https://operation-life-change-olc.onrender.com/'; // e.g. 'https://your-olc-backend.onrender.com'
+const API_BASE_URL = 'https://operation-life-change-olc.onrender.com'.replace(/\/+$/,''); // trailing slashes stripped defensively — a trailing slash here silently breaks every request
+
+/* Render's free tier puts the backend to sleep after ~15 min idle; the first
+   request after that can take 30-60s to "wake" it. We wait generously (45s)
+   rather than give up early, so a cold start doesn't wrongly fall back to
+   local-only and lose the cross-device sync. */
+async function fetchWithTimeout(url, opts, ms){
+  ms = ms || 45000;
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), ms);
+  try{ return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal })); }
+  finally{ clearTimeout(t); }
+}
 
 async function apiSignup(codename, codeid){
   if(!API_BASE_URL) return null;
   try{
-    const res = await fetch(API_BASE_URL+'/api/signup', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({codename,codeid}) });
-    if(!res.ok) return null;
+    const res = await fetchWithTimeout(API_BASE_URL+'/api/signup', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({codename,codeid}) });
+    if(!res.ok){ console.warn('OLC signup failed:', res.status, await res.text().catch(()=>'')); return null; }
     return await res.json();
-  }catch(e){ return null; }
+  }catch(e){ console.warn('OLC signup unreachable:', e.message); return null; }
 }
 async function apiLogin(codename, codeid){
   if(!API_BASE_URL) return null;
   try{
-    const res = await fetch(API_BASE_URL+'/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({codename,codeid}) });
-    if(!res.ok) return null;
+    const res = await fetchWithTimeout(API_BASE_URL+'/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({codename,codeid}) });
+    if(!res.ok){ console.warn('OLC login failed:', res.status, await res.text().catch(()=>'')); return null; }
     return await res.json();
-  }catch(e){ return null; }
+  }catch(e){ console.warn('OLC login unreachable:', e.message); return null; }
 }
 let syncStatus = { checked:false, ok:null, at:null };
 async function apiSaveState(accountId, stateObj){
   if(!API_BASE_URL || !accountId) return;
   try{
-    const res = await fetch(API_BASE_URL+'/api/state/'+accountId, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(stateObj) });
+    const res = await fetchWithTimeout(API_BASE_URL+'/api/state/'+accountId, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(stateObj) });
     syncStatus = { checked:true, ok: res.ok, at: new Date().toISOString() };
-  }catch(e){ syncStatus = { checked:true, ok:false, at: new Date().toISOString() }; }
+    if(!res.ok) console.warn('OLC save failed:', res.status, await res.text().catch(()=>''));
+  }catch(e){ syncStatus = { checked:true, ok:false, at: new Date().toISOString() }; console.warn('OLC save unreachable:', e.message); }
   if(currentSection==='profile') renderSection();
 }
 async function manualSyncNow(){
@@ -2222,7 +2235,11 @@ async function doCreateID(){
   // exactly like adding a Gmail account: it either finds your existing account
   // or creates a new one on the server, and the backend's id is always the
   // real, canonical one.
+  err.style.color = 'var(--dim)';
+  err.textContent = API_BASE_URL ? 'Connecting to cloud sync… this can take up to a minute if the server was asleep.' : '';
   const remote = await apiSignup(codename, codeid);
+  err.textContent = '';
+  err.style.color = '';
 
   if(remote){
     const acc = reconcileLocalAccount(codename, codeid, remote.accountId);
@@ -2258,7 +2275,12 @@ async function doLogin(){
   const codeid = document.getElementById('al_codeid').value.trim();
   const err = document.getElementById('authError');
 
+  err.style.color = 'var(--dim)';
+  err.textContent = API_BASE_URL ? 'Connecting to cloud sync… this can take up to a minute if the server was asleep.' : '';
   const remote = await apiLogin(codename, codeid);
+  err.textContent = '';
+  err.style.color = '';
+
   if(remote){
     const acc = reconcileLocalAccount(codename, codeid, remote.accountId);
     activeAccountId = acc.id;
