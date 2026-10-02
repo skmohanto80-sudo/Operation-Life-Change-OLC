@@ -174,8 +174,10 @@ async function api(method, path, body, token, opts){
       headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
       body: body ? JSON.stringify(body) : undefined,
     });
-    let data = {}; try{ data = await res.json(); }catch(e){}
-    return { ok: res.ok, status: res.status, data };
+    const raw = await res.text().catch(() => '');
+    let data = {}; try{ data = JSON.parse(raw); }catch(e){ data = {}; }
+    if(!isPlain(data)) data = {};
+    return { ok: res.ok, status: res.status, data, raw: raw.slice(0, 200) };
   } finally { clearTimeout(t); }
 }
 /* sign-in style calls: tolerate a sleeping free-tier server, tell the user what's happening */
@@ -453,7 +455,7 @@ function renderAuth(mode, opts){
       <div class="auth-links"><a onclick="renderAuth('signin')">← Back to sign in</a></div>
     </form>`;
   }
-  g.innerHTML = authShell(tabs + body + '<div id="authMsg" class="auth-msg"></div><div id="authError"></div>');
+  g.innerHTML = authShell(tabs + body + '<div id="authMsg" class="auth-msg"></div><div id="authError"></div><div class="auth-links" style="margin-top:8px;"><a onclick="checkServer()">Check server</a></div>');
   const first = g.querySelector('input[type=text]'); if(first && !opts.noFocus) setTimeout(() => { try{ first.focus(); }catch(e){} }, 60);
 }
 function useLegacy(i){
@@ -485,6 +487,43 @@ function addDeviceAccount(a){
   if(i >= 0) l[i] = Object.assign({}, l[i], a, { expired: false }); else l.push(Object.assign({ addedAt: Date.now() }, a));
   saveAccounts(l);
 }
+/* turn any server reply into a message a human can act on */
+function replyError(r, fallback){
+  if(r.data && r.data.error) return r.data.error;
+  const st = r.status;
+  if(st === 404 || st === 405) return 'The server at ' + API_BASE_URL + ' does not have the new OLC backend (HTTP ' + st + '). It is probably still the OLD version — redeploy the new backend folder on Render, then tap "Check server".';
+  if([502, 503, 504].includes(st)) return 'The server is not running properly (HTTP ' + st + '). On Render open the service → Logs: it usually means DATABASE_URL is missing or wrong. Tap "Check server" for details.';
+  return (fallback || 'Request failed') + ' (server replied HTTP ' + st + '). Tap "Check server" for details.';
+}
+async function checkServer(){
+  setAuthErr(''); setAuthMsg('Checking the server… (can take up to a minute if it was asleep)');
+  const t0 = performance.now();
+  try{
+    const r = await api('GET', '/api/health', null, null, { timeout: 70000 });
+    setAuthMsg('');
+    const ms = Math.round(performance.now() - t0);
+    if(r.ok && r.data && r.data.version){
+      const good = r.data.storage === 'postgres' && String(r.data.version).startsWith('2');
+      openModal(`<h3 style="justify-content:center;">SERVER CHECK</h3>
+        <div class="diag ${good ? 'ok' : 'bad'}">${good ? '✓' : '✗'} Server answered in ${ms} ms — backend v${esc(r.data.version)}, storage: ${esc(r.data.storage)}</div>
+        ${r.data.storage !== 'postgres' ? '<div class="diag bad">✗ Storage is not PostgreSQL. Data would be lost. Set DATABASE_URL on Render.</div>' : ''}
+        <div class="stat-label" style="margin-top:8px;">Address used: ${esc(API_BASE_URL)}</div>
+        <button class="btn" style="width:100%; margin-top:12px;" onclick="closeModal()">Close</button>`);
+    } else {
+      openModal(`<h3 style="justify-content:center;">SERVER CHECK</h3>
+        <div class="diag bad">✗ HTTP ${r.status} from ${esc(API_BASE_URL)}/api/health</div>
+        <div class="stat-label">${r.status === 404 ? 'The new backend is NOT running at this address (old version or wrong service).' : 'The server is up but not healthy — check the Render logs.'}</div>
+        <div class="stat-label mono" style="margin-top:8px; word-break:break-all;">${esc(r.raw || '(empty reply)')}</div>
+        <button class="btn" style="width:100%; margin-top:12px;" onclick="closeModal()">Close</button>`);
+    }
+  }catch(e){
+    setAuthMsg('');
+    openModal(`<h3 style="justify-content:center;">SERVER CHECK</h3>
+      <div class="diag bad">✗ Cannot reach ${esc(API_BASE_URL)}</div>
+      <div class="stat-label">${navigator.onLine ? 'Wrong address in API_BASE_URL (top of auth.js), or the Render service is stopped/failed to deploy.' : 'You are offline.'}</div>
+      <button class="btn" style="width:100%; margin-top:12px;" onclick="closeModal()">Close</button>`);
+  }
+}
 async function submitCreate(e){
   e.preventDefault();
   const u = normalizeUsername($('cr_user').value), p = $('cr_pass').value, p2 = $('cr_pass2').value;
@@ -496,7 +535,7 @@ async function submitCreate(e){
   try{ r = await authCall('/api/register', { username: u, password: p, avatar: createAvatar, device: deviceName() }, setAuthMsg); }
   catch(err){ setAuthBusy(false); setAuthMsg(''); return setAuthErr('Cannot reach the server. Check your internet and try again — nothing was lost.'); }
   setAuthBusy(false); setAuthMsg('');
-  if(!r.ok) return setAuthErr(r.data.error || 'Could not create the account.', r.data.field === 'password' ? 'cr_pass' : 'cr_user');
+  if(!r.ok) return setAuthErr(replyError(r, 'Could not create the account'), r.data.field === 'password' ? 'cr_pass' : r.data.field === 'username' ? 'cr_user' : null);
   const d = r.data;
   addDeviceAccount({ id: d.user.id, username: d.user.username, avatar: d.user.avatar, token: d.token });
   activeAccountId = d.user.id; LS.set(ACTIVE_KEY, d.user.id);
@@ -518,7 +557,7 @@ async function submitSignin(e){
   try{ r = await authCall('/api/login', { username: u, password: p, device: deviceName() }, setAuthMsg); }
   catch(err){ setAuthBusy(false); setAuthMsg(''); return setAuthErr('Cannot reach the server. Check your internet. (If you were already signed in on this device, close this and keep using the app — your data is safe.)'); }
   setAuthBusy(false); setAuthMsg('');
-  if(!r.ok) return setAuthErr(r.data.error || 'Could not sign in.', 'si_pass');
+  if(!r.ok) return setAuthErr(replyError(r, 'Could not sign in'), r.data.error ? 'si_pass' : null);
   offerSavePassword(r.data.user.username, p);
   completeSignIn(r.data);
   $('authGate').innerHTML = '';
@@ -534,7 +573,7 @@ async function submitForgot(e){
   try{ r = await authCall('/api/recover', { username: u, recoveryCode: code, newPassword: p, device: deviceName() }, setAuthMsg); }
   catch(err){ setAuthBusy(false); setAuthMsg(''); return setAuthErr('Cannot reach the server. Try again in a moment.'); }
   setAuthBusy(false); setAuthMsg('');
-  if(!r.ok) return setAuthErr(r.data.error || 'Recovery failed.', r.data.field === 'password' ? 'fr_pass' : 'fr_code');
+  if(!r.ok) return setAuthErr(replyError(r, 'Recovery failed'), r.data.field === 'password' ? 'fr_pass' : r.data.error ? 'fr_code' : null);
   offerSavePassword(r.data.user.username, p);
   completeSignIn(r.data);
   $('authGate').innerHTML = '';
