@@ -99,7 +99,6 @@ const DEFAULT_STATE = {
 let state = null;
 let currentSection = 'home';
 let saveTimer = null;
-let sessionUnlocked = false;
 let editingTracker = { name:null, index:null };
 
 function todayStr(d){ const x=d?new Date(d):new Date(); return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0'); }
@@ -161,6 +160,7 @@ async function uploadProfilePhoto(input){
     const dataUrl = await fileToCompressedDataURL(file, 400, 0.85);
     state.profile.photo = dataUrl;
     saveState(); syncProfileImagesToDOM(); renderSection();
+    if(typeof setAccountAvatarFromFile==='function') setAccountAvatarFromFile(file);
   }catch(e){ alert('Could not read that image — try a different file.'); }
 }
 async function uploadIdCardFace(input, face){
@@ -203,51 +203,7 @@ function ensureDay(date){
   return d;
 }
 
-/* ---------- multi-account storage ----------
-   Uses browser localStorage (works in any browser, hosted or opened as a
-   local file). Each device can hold multiple Agent IDs; every account's
-   data is stored under its own key so accounts never mix. */
-const ACCOUNTS_KEY = 'olc_accounts';       // [{id, codename, codeid}]
-let activeAccountId = null;
-
-function getAccounts(){
-  try{ return JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || '[]'); }
-  catch(e){ return []; }
-}
-function saveAccounts(list){
-  try{ localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(list)); }catch(e){ console.error('save accounts failed', e); }
-}
-function findAccount(codename, codeid){
-  return getAccounts().find(a => a.codename===codename && a.codeid===codeid) || null;
-}
-function stateKeyFor(accountId){ return 'olc_state_' + accountId; }
-
-async function loadStateFor(accountId){
-  try{
-    const raw = localStorage.getItem(stateKeyFor(accountId));
-    if(raw){ const loaded = JSON.parse(raw); state = Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_STATE)), loaded); }
-    else state = JSON.parse(JSON.stringify(DEFAULT_STATE));
-  }catch(e){ state = JSON.parse(JSON.stringify(DEFAULT_STATE)); }
-  if(!state.streaks.screen) state.streaks.screen = {count:0,lastDate:null,_pc:0,_pd:null};
-  if(!state.customMedals) state.customMedals = [];
-  if(!state.customBadges) state.customBadges = [];
-  if(!state.achievements) state.achievements = [];
-  if(!state.ruleBookNotes){
-    state.ruleBookNotes = [];
-    if(state.ruleBookCustom && state.ruleBookCustom.trim()){
-      state.ruleBookNotes.push({ id: uid('note'), date: state.profile.startDate||todayStr(), text: state.ruleBookCustom.trim() });
-    }
-  }
-  activeAccountId = accountId;
-}
-function saveState(){
-  if(!activeAccountId) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(()=>{
-    try{ localStorage.setItem(stateKeyFor(activeAccountId), JSON.stringify(state)); }catch(e){ console.error('save failed', e); }
-    apiSaveState(activeAccountId, state);
-  }, 250);
-}
+/* storage, accounts, sync and app-lock now live in auth.js */
 
 /* ---------- rank / xp ---------- */
 function rankXP(i){ return (state && state.rankOverrides && state.rankOverrides[i]!=null) ? state.rankOverrides[i] : RANKS[i].xp; }
@@ -848,7 +804,7 @@ function badgeFormHTML(){
 }
 
 /* ---------- rollover ---------- */
-function rollover(){ ensureDay(todayStr()); saveState(); }
+function rollover(){ const t=todayStr(); const had = !!(state && state.dailyLogs && state.dailyLogs[t]); ensureDay(t); if(!had) saveState(); }
 
 /* ========================================================
    RENDER — router
@@ -887,7 +843,13 @@ function renderSection(){
     streaks:secStreaks, daily:secDaily, trackers:secTrackers, rank:secRank, medals:secMedals,
     achievements:secAchievements, badges:secBadges, rulebook:secRulebook, archives:secArchives };
   const fn = map[currentSection] || secHome;
-  document.getElementById('mainContent').innerHTML = fn();
+  let html;
+  try{ html = fn(); }
+  catch(e){
+    console.error('render failed for', currentSection, e);
+    html = `<div class="panel"><h3>⚠ This page hit a data problem</h3><p class="stat-label">Your saved data is NOT deleted. Press Repair, or open another section.</p><p class="mono" style="font-size:11px; color:var(--danger);">${esc(String(e && e.message || e))}</p><button class="btn" onclick="repairData()">Repair &amp; Reload</button></div>`;
+  }
+  document.getElementById('mainContent').innerHTML = html;
   renderTopbar();
   if(currentSection==='rulebook') fbRenderBase();
 }
@@ -1107,39 +1069,9 @@ function secProfile(){
     </div>
   </div>
 
-  <div class="panel" style="margin-top:16px;">
-    <h3><span class="ic">🪪</span>LOGGED-IN ACCOUNT</h3>
-    <div class="grid c3">
-      <div><div class="eyebrow">CODENAME</div><div class="stat-big" style="font-size:18px;">${esc(loggedAccount()?.codename || '—')}</div></div>
-      <div><div class="eyebrow">CODE ID</div><div class="stat-big" style="font-size:18px;">${esc(loggedAccount()?.codeid || '—')}</div></div>
-      <div><div class="eyebrow">ACCOUNTS ON THIS DEVICE</div><div class="stat-big" style="font-size:18px;">${getAccounts().length}</div></div>
-    </div>
-    <p class="stat-label" style="margin-top:12px;">Each Agent ID on this device keeps completely separate data. Use the 🔒 button in the top bar to switch to another ID or lock the app.</p>
-    <button class="btn ghost sm" style="margin-top:8px;" onclick="lockApp()">Switch Account / Lock</button>
-  </div>
-
-  <div class="panel" style="margin-top:16px;">
-    <h3><span class="ic">☁</span>CLOUD SYNC</h3>
-    ${API_BASE_URL ? `
-      <div class="stat-label">Backend: <span class="mono">${esc(API_BASE_URL)}</span></div>
-      <div class="stat-label" style="margin-top:6px; color:${syncStatus.ok===false?'var(--danger)':syncStatus.ok===true?'var(--green)':'var(--dim)'};">
-        ${syncStatus.ok===true ? '✓ Synced'+(syncStatus.at?(' at '+new Date(syncStatus.at).toLocaleTimeString()):'') : syncStatus.ok===false ? '⚠ Last sync failed — your data is safe on this device and will retry automatically.' : 'Not synced yet this session.'}
-      </div>
-      <button class="btn ghost sm" style="margin-top:8px;" onclick="manualSyncNow()">Sync Now</button>
-      <p class="stat-label" style="margin-top:10px;">On your phone: open the app, choose "Create ID" (or "Login"), enter the exact same Codename + Code ID, and this same data will load there.</p>
-    ` : `
-      <p class="stat-label">Right now OLC only saves to this device's browser. To see the same data on your phone too, you need a small free backend:</p>
-      <ol style="font-size:13px; color:var(--dim); padding-left:18px; margin:8px 0; line-height:1.7;">
-        <li>Deploy the <span class="mono">backend/</span> folder (already in your project zip) to Render.com — it's free. Full steps are in <span class="mono">backend/README.md</span>.</li>
-        <li>You'll get a URL like <span class="mono">https://olc-backend.onrender.com</span>.</li>
-        <li>Send me that URL and I'll wire it into the app for you — or set it yourself in <span class="mono">frontend/app.js</span> at the line <span class="mono">const API_BASE_URL = ''</span>.</li>
-        <li>Reload the app, then on your phone use the exact same Codename + Code ID via "Create ID" or "Login" to pull this same account there.</li>
-      </ol>
-    `}
-  </div>
+  ${accountPanelsHTML()}
   `;
 }
-function loggedAccount(){ return getAccounts().find(a=>a.id===activeAccountId) || null; }
 function saveProfile(){
   state.profile.name = document.getElementById('pf_name').value;
   state.profile.codename = document.getElementById('pf_codename').value;
@@ -1302,6 +1234,21 @@ function saveEOD(date){
 /* ========================================================
    SECTION: TRACKER DIVISION
 ======================================================== */
+/* radar chart for the Command Dashboard (this function was missing before, which blanked the whole page) */
+function radarChartSVG(stats){
+  const keys = ['study','fitness','spiritual','discipline','mood'];
+  const labels = { study:'STUDY', fitness:'FITNESS', spiritual:'SPIRIT', discipline:'DISCIPLINE', mood:'MOOD' };
+  const S = 260, c = S/2, R = 84;
+  const pt = (i, f) => { const a = -Math.PI/2 + i*2*Math.PI/keys.length; return [c + Math.cos(a)*R*f, c + Math.sin(a)*R*f]; };
+  const ring = (f) => keys.map((_,i)=>pt(i,f).join(',')).join(' ');
+  const vals = keys.map((k,i)=>pt(i, clamp((Number(stats && stats[k])||0)/100, 0, 1)).join(',')).join(' ');
+  return `<svg viewBox="0 0 ${S} ${S}" style="width:100%; max-width:300px; display:block; margin:0 auto;">
+    ${[0.25,0.5,0.75,1].map(f=>`<polygon points="${ring(f)}" fill="none" stroke="var(--border)" stroke-width="1"/>`).join('')}
+    ${keys.map((_,i)=>{ const [x,y]=pt(i,1); return `<line x1="${c}" y1="${c}" x2="${x}" y2="${y}" stroke="var(--border)" stroke-width="1"/>`; }).join('')}
+    <polygon points="${vals}" fill="color-mix(in srgb, var(--lavender) 30%, transparent)" stroke="var(--lavender)" stroke-width="2"/>
+    ${keys.map((k,i)=>{ const [x,y]=pt(i,1.2); return `<text x="${x}" y="${y}" fill="var(--dim)" font-size="9" text-anchor="middle" dominant-baseline="middle" font-family="Share Tech Mono, monospace">${labels[k]}</text>`; }).join('')}
+  </svg>`;
+}
 function lineChartSVG(log, field){
   const sorted = [...log].sort((a,b)=>a.date<b.date?-1:1).slice(-12);
   if(sorted.length<2) return '<div class="empty">Log at least 2 entries to see trend</div>';
@@ -2098,7 +2045,7 @@ function exportMyData(){
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `olc-backup-${(loggedAccount()?.codename||'agent').replace(/\s+/g,'_')}-${todayStr()}.json`;
+  a.download = `olc-backup-${(loggedAccount()?.username||'agent').replace(/[^A-Za-z0-9._-]+/g,'_')}-${todayStr()}.json`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
@@ -2133,209 +2080,6 @@ function openDayDetail(date){
   document.getElementById('dayDetailModal').style.display = 'flex';
 }
 function closeDayDetail(){ document.getElementById('dayDetailModal').style.display = 'none'; }
-
-/* ========================================================
-   AUTH — Create ID / Add ID (no email/password, multi-account)
-======================================================== */
-function showAuthTab(tab){
-  document.getElementById('authTabCreate').classList.toggle('active', tab==='create');
-  document.getElementById('authTabLogin').classList.toggle('active', tab==='login');
-  document.getElementById('authCreatePane').style.display = tab==='create' ? '' : 'none';
-  document.getElementById('authLoginPane').style.display = tab==='login' ? '' : 'none';
-  document.getElementById('authError').textContent='';
-}
-/* ========================================================
-   OPTIONAL BACKEND SYNC
-   Leave API_BASE_URL empty to run fully offline on localStorage only
-   (perfect for GitHub Pages with no server). Set it to a deployed
-   instance of /backend (see backend/server.js) to get real cross-device
-   accounts + data. The app always keeps a local copy too, so it still
-   works if the backend is briefly unreachable.
-======================================================== */
-const API_BASE_URL = 'https://operation-life-change-olc.onrender.com'.replace(/\/+$/,''); // trailing slashes stripped defensively — a trailing slash here silently breaks every request
-
-/* Render's free tier puts the backend to sleep after ~15 min idle; the first
-   request after that can take 30-60s to "wake" it. We wait generously (45s)
-   rather than give up early, so a cold start doesn't wrongly fall back to
-   local-only and lose the cross-device sync. */
-async function fetchWithTimeout(url, opts, ms){
-  ms = ms || 45000;
-  const ctrl = new AbortController();
-  const t = setTimeout(()=>ctrl.abort(), ms);
-  try{ return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal })); }
-  finally{ clearTimeout(t); }
-}
-
-async function apiSignup(codename, codeid){
-  if(!API_BASE_URL) return null;
-  try{
-    const res = await fetchWithTimeout(API_BASE_URL+'/api/signup', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({codename,codeid}) });
-    if(!res.ok){ console.warn('OLC signup failed:', res.status, await res.text().catch(()=>'')); return null; }
-    return await res.json();
-  }catch(e){ console.warn('OLC signup unreachable:', e.message); return null; }
-}
-async function apiLogin(codename, codeid){
-  if(!API_BASE_URL) return null;
-  try{
-    const res = await fetchWithTimeout(API_BASE_URL+'/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({codename,codeid}) });
-    if(!res.ok){ console.warn('OLC login failed:', res.status, await res.text().catch(()=>'')); return null; }
-    return await res.json();
-  }catch(e){ console.warn('OLC login unreachable:', e.message); return null; }
-}
-let syncStatus = { checked:false, ok:null, at:null };
-async function apiSaveState(accountId, stateObj){
-  if(!API_BASE_URL || !accountId) return;
-  try{
-    const res = await fetchWithTimeout(API_BASE_URL+'/api/state/'+accountId, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(stateObj) });
-    syncStatus = { checked:true, ok: res.ok, at: new Date().toISOString() };
-    if(!res.ok) console.warn('OLC save failed:', res.status, await res.text().catch(()=>''));
-  }catch(e){ syncStatus = { checked:true, ok:false, at: new Date().toISOString() }; console.warn('OLC save unreachable:', e.message); }
-  if(currentSection==='profile') renderSection();
-}
-async function manualSyncNow(){
-  if(!API_BASE_URL){ alert('No cloud backend is connected yet — see the Cloud Sync panel below for setup steps.'); return; }
-  await apiSaveState(activeAccountId, state);
-  renderSection();
-}
-
-/* Reconciles a local account record with the backend's canonical account id.
-   Prevents the "I made this ID locally before the backend existed" bug,
-   where a device could otherwise end up with two disconnected copies of
-   the same account. Whatever the backend calls this account IS the account
-   — a pre-existing local-only copy gets migrated onto that id. */
-function reconcileLocalAccount(codename, codeid, canonicalId){
-  const accounts = getAccounts();
-  let acc = accounts.find(a => a.codename===codename && a.codeid===codeid);
-  if(acc && acc.id !== canonicalId){
-    // Migrate any locally-cached state from the old id to the canonical id.
-    try{
-      const oldRaw = localStorage.getItem(stateKeyFor(acc.id));
-      if(oldRaw && !localStorage.getItem(stateKeyFor(canonicalId))){
-        localStorage.setItem(stateKeyFor(canonicalId), oldRaw);
-      }
-      localStorage.removeItem(stateKeyFor(acc.id));
-    }catch(e){}
-    acc.id = canonicalId;
-    saveAccounts(accounts);
-  } else if(!acc){
-    acc = { id: canonicalId, codename, codeid };
-    accounts.push(acc);
-    saveAccounts(accounts);
-  }
-  return acc;
-}
-
-async function doCreateID(){
-  const codename = document.getElementById('ac_codename').value.trim();
-  const codeid = document.getElementById('ac_codeid').value.trim();
-  const err = document.getElementById('authError');
-  if(!codename || !codeid){ err.textContent = 'Enter both a Codename and a Code ID.'; return; }
-
-  // Try the backend first (if configured) so the same ID works across devices,
-  // exactly like adding a Gmail account: it either finds your existing account
-  // or creates a new one on the server, and the backend's id is always the
-  // real, canonical one.
-  err.style.color = 'var(--dim)';
-  err.textContent = API_BASE_URL ? 'Connecting to cloud sync… this can take up to a minute if the server was asleep.' : '';
-  const remote = await apiSignup(codename, codeid);
-  err.textContent = '';
-  err.style.color = '';
-
-  if(remote){
-    const acc = reconcileLocalAccount(codename, codeid, remote.accountId);
-    activeAccountId = acc.id;
-    if(remote.state){
-      state = Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_STATE)), remote.state);
-      localStorage.setItem(stateKeyFor(acc.id), JSON.stringify(state));
-    } else {
-      // No server copy yet — use whatever's cached locally (migrated above) or a fresh default.
-      await loadStateFor(acc.id);
-      state.profile.codename = state.profile.codename || codename;
-      saveState();
-    }
-    sessionUnlocked = true; enterApp(); return;
-  }
-
-  // No backend configured / unreachable — fall back to local-only accounts.
-  let acc = findAccount(codename, codeid);
-  if(acc){ await loadStateFor(acc.id); sessionUnlocked = true; enterApp(); return; }
-
-  const accounts = getAccounts();
-  acc = { id: uid('acct'), codename, codeid };
-  accounts.push(acc);
-  saveAccounts(accounts);
-  await loadStateFor(acc.id); // fresh DEFAULT_STATE for this new account
-  state.profile.codename = codename;
-  saveState();
-  sessionUnlocked = true;
-  enterApp();
-}
-async function doLogin(){
-  const codename = document.getElementById('al_codename').value.trim();
-  const codeid = document.getElementById('al_codeid').value.trim();
-  const err = document.getElementById('authError');
-
-  err.style.color = 'var(--dim)';
-  err.textContent = API_BASE_URL ? 'Connecting to cloud sync… this can take up to a minute if the server was asleep.' : '';
-  const remote = await apiLogin(codename, codeid);
-  err.textContent = '';
-  err.style.color = '';
-
-  if(remote){
-    const acc = reconcileLocalAccount(codename, codeid, remote.accountId);
-    activeAccountId = acc.id;
-    state = remote.state ? Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_STATE)), remote.state) : JSON.parse(JSON.stringify(DEFAULT_STATE));
-    localStorage.setItem(stateKeyFor(acc.id), JSON.stringify(state));
-    sessionUnlocked = true; enterApp(); return;
-  }
-
-  const acc = findAccount(codename, codeid);
-  if(!acc){ err.textContent = 'No matching ID found on this device, and the backend is unreachable right now. Check your connection, or use Create ID if this is genuinely new.'; return; }
-  await loadStateFor(acc.id);
-  sessionUnlocked = true;
-  enterApp();
-}
-function lockApp(){
-  sessionUnlocked = false;
-  activeAccountId = null;
-  state = null;
-  document.getElementById('app').classList.remove('ready');
-  document.getElementById('authGate').style.display = 'flex';
-  showAuthTab(getAccounts().length ? 'login' : 'create');
-  document.getElementById('ac_codename').value='';
-  document.getElementById('ac_codeid').value='';
-  document.getElementById('al_codename').value='';
-  document.getElementById('al_codeid').value='';
-}
-function showAuthGate(){
-  document.getElementById('authGate').style.display = 'flex';
-  showAuthTab(getAccounts().length ? 'login' : 'create');
-}
-function enterApp(){
-  document.getElementById('authGate').style.display = 'none';
-  runBootAndApp();
-}
-
-/* ========================================================
-   INIT
-======================================================== */
-function runBootAndApp(){
-  rollover();
-  setTheme(state.settings.theme || 'dark');
-  if(state.settings.colorTheme && state.settings.colorTheme!=='violet') document.documentElement.setAttribute('data-color', state.settings.colorTheme);
-  applyMonkMode(state.settings.mode || 'normal');
-  syncProfileImagesToDOM();
-  document.querySelectorAll('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.sec==='home'));
-  renderAll();
-  document.getElementById('boot').style.display='flex';
-  document.getElementById('boot').style.opacity='1';
-  document.querySelectorAll('#boot .bootline').forEach(el=>{ el.style.animation='none'; el.offsetHeight; el.style.animation=''; el.classList.add('blink-in'); });
-  setTimeout(()=>{
-    document.getElementById('boot').style.opacity='0';
-    document.getElementById('app').classList.add('ready');
-    setTimeout(()=>{ document.getElementById('boot').style.display='none'; }, 650);
-  }, 2600);
-}
 
 /* ========================================================
    PWA — "Install App" support
@@ -2382,12 +2126,4 @@ function initInstallButtonVisibility(){
   btn.style.display = isStandalone() ? 'none' : '';
 }
 
-async function init(){
-  tickClock(); setInterval(tickClock, 1000);
-  setInterval(()=>{ if(state) { rollover(); renderTopbar(); } }, 30000);
-  document.getElementById('boot').style.display='none';
-  registerServiceWorker();
-  initInstallButtonVisibility();
-  showAuthGate();
-}
-init();
+// startup is handled by auth.js (boot())

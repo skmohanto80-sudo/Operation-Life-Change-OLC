@@ -15,32 +15,22 @@
 <link rel="icon" sizes="192x192" href="assets/icon-192.png">
 <link rel="icon" sizes="512x512" href="assets/icon-512.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Great+Vibes&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Great+Vibes&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&family=Great+Vibes&display=swap" rel="stylesheet"></noscript>
+<script>
+/* Runs before first paint: if an app lock exists on this device, show the lock screen immediately (no content flash). */
+try{ if(localStorage.getItem('olc2_lock')) document.documentElement.classList.add('locked-boot'); }catch(e){}
+</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<div id="authGate">
-  <div class="authbox panel">
-    <img src="assets/logo_symbol.png" alt="OLC">
-    <div class="authtabs">
-      <div class="authtab" id="authTabCreate" onclick="showAuthTab('create')">CREATE ID</div>
-      <div class="authtab" id="authTabLogin" onclick="showAuthTab('login')">ADD ID / LOGIN</div>
-    </div>
-    <div id="authCreatePane">
-      <div class="field"><label class="f">Codename</label><input type="text" id="ac_codename" placeholder="e.g. AGENT SK"></div>
-      <div class="field"><label class="f">Code ID</label><input type="text" id="ac_codeid" placeholder="e.g. SK7"></div>
-      <button class="btn" style="width:100%;" onclick="doCreateID()">Create ID &amp; Enter</button>
-      <div class="stat-label" style="margin-top:10px;">One device can hold multiple Agent IDs — each keeps its own separate data.</div>
-    </div>
-    <div id="authLoginPane" style="display:none;">
-      <div class="field"><label class="f">Codename</label><input type="text" id="al_codename" placeholder="Enter your Codename"></div>
-      <div class="field"><label class="f">Code ID</label><input type="text" id="al_codeid" placeholder="Enter your Code ID"></div>
-      <button class="btn" style="width:100%;" onclick="doLogin()">Add ID &amp; Enter</button>
-    </div>
-    <div id="authError"></div>
-  </div>
-</div>
+<div id="authGate"></div>
+<div id="lockScreen"></div>
+<div id="olcModal"></div>
+<div id="acctMenu"></div>
+<div id="toast"></div>
 
 <div id="boot">
   <div class="bootbox">
@@ -66,10 +56,10 @@
       </svg>
     </div>
     <img src="assets/logo_text.png" alt="Operation Life Change" style="width:100%; max-width:420px; display:block; margin:10px auto 22px; filter:drop-shadow(0 0 20px rgba(215,121,241,.45));">
-    <div class="bootline" style="animation-delay:.1s">&gt; INITIALIZING CENTRAL COMMAND SYSTEM...</div>
-    <div class="bootline" style="animation-delay:.5s">&gt; LOADING AGENT PROFILE...</div>
-    <div class="bootline" style="animation-delay:.9s">&gt; SYNCING MISSION DATA...</div>
-    <div class="bootline" style="animation-delay:1.3s">&gt; OPERATION LIFE CHANGE — STANDING BY</div>
+    <div class="bootline" style="animation-delay:.05s">&gt; INITIALIZING CENTRAL COMMAND SYSTEM...</div>
+    <div class="bootline" style="animation-delay:.25s">&gt; LOADING AGENT PROFILE...</div>
+    <div class="bootline" style="animation-delay:.45s">&gt; SYNCING MISSION DATA...</div>
+    <div class="bootline" style="animation-delay:.65s">&gt; OPERATION LIFE CHANGE — STANDING BY</div>
     <div class="bootbar"><i></i></div>
   </div>
 </div>
@@ -82,6 +72,7 @@
       <div class="tt">OPERATION LIFE CHANGE<small>DISCIPLINE BEFORE MOTIVATION</small></div>
     </div>
     <div class="spacer"></div>
+    <div class="hud-pill" id="syncPill" title="Cloud sync status" onclick="syncPillClick()" style="cursor:pointer;"><span class="sdot"></span><span id="syncPillTxt">—</span></div>
     <div class="hud-pill"><span class="dot"></span><span id="datePill" class="mono">-- --- ----</span></div>
     <div class="hud-pill"><span id="clockPill" class="mono">--:--:--</span></div>
     <div class="hud-pill">RANK <b id="rankPillTxt">—</b></div>
@@ -94,10 +85,10 @@
     <button class="btn ghost sm" onclick="openThemeModal()" title="Color Theme">🎨 Theme</button>
     <button class="btn ghost sm" id="modeBtn" onclick="toggleMonkMode()" title="Switch focus mode">🧘 Monk Mode</button>
     <button class="btn cyan sm" id="installBtn" onclick="doInstallApp()" style="display:none;" title="Install as an app">⬇ Install App</button>
-    <div class="avatarBtn" onclick="go('profile')" title="Agent Profile">
+    <div class="avatarBtn" onclick="toggleAcctMenu(event)" title="Accounts">
       <img src="assets/profile.png" alt="Agent" id="topbarAvatarImg">
     </div>
-    <button class="btn ghost sm" onclick="lockApp()" title="Switch / Lock">🔒</button>
+    <button class="btn ghost sm" onclick="lockNow()" title="Lock app">🔒</button>
   </div>
   <div id="monkBanner">🧘 MONK MODE ACTIVE — DISTRACTIONS MINIMIZED</div>
 
@@ -210,5 +201,6 @@
 </div>
 
 <script src="app.js"></script>
+<script src="auth.js"></script>
 </body>
 </html>
