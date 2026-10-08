@@ -69,6 +69,15 @@ const SCHEMA = [
      state_updated_at BIGINT NOT NULL,
      created_at BIGINT NOT NULL
    )`,
+  `CREATE TABLE IF NOT EXISTS blobs (
+     user_id TEXT NOT NULL,
+     id TEXT NOT NULL,
+     mime TEXT NOT NULL,
+     size INTEGER NOT NULL,
+     data BYTEA NOT NULL,
+     created_at BIGINT NOT NULL,
+     PRIMARY KEY (user_id, id)
+   )`,
   `CREATE TABLE IF NOT EXISTS legacy_accounts (
      id TEXT PRIMARY KEY, codename TEXT NOT NULL, codeid TEXT NOT NULL, data TEXT
    )`,

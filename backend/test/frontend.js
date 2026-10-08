@@ -4,7 +4,9 @@ const { JSDOM } = require('jsdom');
 const { main } = require('../server');
 const FE = path.join(__dirname, '../../frontend');
 const html = fs.readFileSync(path.join(FE, 'index.html'), 'utf8').replace(/<script[^>]*src=[^>]*><\/script>/g, '');
-const appJs = fs.readFileSync(path.join(FE, 'app.js'), 'utf8'), authJs = fs.readFileSync(path.join(FE, 'auth.js'), 'utf8');
+const rd = (f) => fs.readFileSync(path.join(FE, f), 'utf8');
+const appJs = rd('app.js'), authJs = rd('auth.js'), mergeJs = rd('merge.js'), blobsJs = rd('blobs.js'), v10Js = rd('v10.js'), journalJs = rd('journal.js');
+require('fake-indexeddb/auto'); const FDB = require('fake-indexeddb');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 let n = 0; const ok = (t) => console.log('  ✓', t, ++n);
 let BASE, puts = 0;
@@ -13,14 +15,14 @@ function device(storage) {
   const dom = new JSDOM(html, { url: 'https://olc.test/', runScripts: 'dangerously', pretendToBeVisual: true });
   const w = dom.window;
   if (storage) for (const [k, v] of Object.entries(storage)) w.localStorage.setItem(k, v);
-  w.fetch = (u, o) => { if (o && o.method === 'PUT' && /\/api\/state/.test(u)) puts++; return fetch(String(u).replace('https://operation-life-change-olc.onrender.com', BASE), o); };
+  w.fetch = (u, o) => { if (o && o.method === 'POST' && /\/api\/sync/.test(u)) puts++; return fetch(String(u).replace('https://operation-life-change-olc.onrender.com', BASE), o); };
   w.AbortController = AbortController; w.crypto = require('crypto').webcrypto; w.TextEncoder = TextEncoder;
-  w.matchMedia = () => ({ matches: false }); w.confirm = () => true; w.alert = () => {};
+  w.indexedDB = indexedDB; w.IDBKeyRange = IDBKeyRange; w.Blob = Blob; w.File = File; w.CustomEvent = w.CustomEvent || CustomEvent; let ou = 0; w.URL.createObjectURL = () => 'blob:mock/' + (++ou); w.createImageBitmap = undefined; w.TextDecoder = TextDecoder;
+  w.fetch = w.fetch; w.matchMedia = () => ({ matches: false, addEventListener(){} }); w.confirm = () => true; w.alert = () => {};
   w.HTMLElement.prototype.scrollIntoView = () => {}; w.scrollTo = () => {};
   const ctx = dom.getInternalVMContext();
   const err = []; w.addEventListener('error', e => err.push(e.message));
-  new vm.Script(appJs, { filename: 'app.js' }).runInContext(ctx);
-  new vm.Script(authJs, { filename: 'auth.js' }).runInContext(ctx);
+  for (const [src, fn] of [[mergeJs, 'merge.js'], [appJs, 'app.js'], [blobsJs, 'blobs.js'], [v10Js, 'v10.js'], [authJs, 'auth.js']]) new vm.Script(src, { filename: fn }).runInContext(ctx);
   const d = { w, ctx, err, ev: (s) => vm.runInContext(s, ctx), $: (id) => w.document.getElementById(id),
     store: () => { const o = {}; for (let i = 0; i < w.localStorage.length; i++) { const k = w.localStorage.key(i); o[k] = w.localStorage.getItem(k); } return o; },
     until: async (f, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { try { if (f()) return; } catch (e) {} await sleep(40); } throw new Error('timeout waiting: ' + f); },
@@ -72,15 +74,30 @@ const fill = (d, o) => Object.entries(o).forEach(([id, v]) => { d.$(id).value = 
   assert.equal(B.ev('state.xp'), 777); ok('2nd device signs in and gets all data');
 
   // ---- edit on B -> shows on A
-  B.ev('state.xp = 900; saveState();'); await B.until(() => B.$('syncPillTxt').textContent === 'Synced', 10000);
+  B.ev('addXP(123); saveState();'); await B.until(() => B.$('syncPillTxt').textContent === 'Synced', 10000);
   await A.ev('pullState({manual:true})'); await A.until(() => A.ev('state.xp') === 900); ok('change on one device appears on the other');
 
-  // ---- conflict: both edit offline-ish -> nothing lost
-  A.ev('state.xp = 1000; saveState();'); B.ev('state.xp = 950; saveState();');
-  await sleep(300); await A.ev('pushState()'); await A.until(() => A.ev('meta.dirty') === false);
-  await B.ev('pushState()'); await B.until(() => B.ev('meta.dirty') === false, 10000);
-  const keptBackups = JSON.parse(B.store()[B.ev('bkKey(activeAccountId)')] || '[]').length + JSON.parse(A.store()[A.ev('bkKey(activeAccountId)')] || '[]').length;
-  assert.ok(keptBackups >= 1, 'losing copy must be kept'); ok('conflict resolved, losing copy kept as backup');
+  // ---- THE BIG ONE: both devices edit different things at the same time, then sync -> NOTHING vanishes
+  A.ev("ensureDay(todayStr()); state.dailyLogs[todayStr()].waterL = 2.25; state.profile.name = 'Name from laptop'; addXP(50); saveState();");
+  B.ev("ensureDay(todayStr()); state.dailyLogs[todayStr()].ratings.study = 4; state.trackerLogs.weight.push({date:'2026-10-07', kg:49.5}); addXP(7); saveState();");
+  await sleep(500);
+  await A.ev('syncNow({force:true})'); await B.ev('syncNow({force:true})'); await A.ev('syncNow({force:true})'); await B.ev('syncNow({force:true})');
+  await A.until(() => A.ev('meta.dirty') === false && B.ev('meta.dirty') === false, 12000);
+  for (const D of [A, B]) {
+    assert.equal(D.ev('state.dailyLogs[todayStr()].waterL'), 2.25, 'laptop water kept');
+    assert.equal(D.ev('state.dailyLogs[todayStr()].ratings.study'), 4, 'phone rating kept');
+    assert.equal(D.ev('state.profile.name'), 'Name from laptop');
+    assert.equal(D.ev('state.trackerLogs.weight.length'), 2, 'phone weight entry kept');
+    assert.equal(D.ev('state.xp'), 900 + 50 + 7, 'XP from both devices adds up');
+  }
+  ok('laptop input + phone input BOTH survive syncing on both devices (xp ' + A.ev('state.xp') + ')');
+  // same field edited on both: latest edit wins everywhere
+  A.ev("state.profile.name = 'older'; saveState();"); await sleep(450); await A.ev('syncNow({force:true})');
+  B.ev("state.profile.name = 'newest edit'; saveState();"); await sleep(450); await B.ev('syncNow({force:true})'); await A.ev('syncNow({force:true})');
+  await A.until(() => A.ev('state.profile.name') === 'newest edit'); assert.equal(B.ev('state.profile.name'), 'newest edit'); ok('same field: the latest edit wins on every device');
+  // live push: B changes, A hears about it without asking
+  B.ev("state.profile.cls = 'live-test'; saveState();"); await B.ev('syncNow({force:true})');
+  await A.until(() => A.ev("state.profile.cls") === 'live-test', 8000); ok('live update reaches the other device by itself');
 
   // ---- multi-account on ONE device
   A.ev("addAccount()"); await A.until(() => A.$('authGate').style.display === 'flex');
@@ -89,10 +106,10 @@ const fill = (d, o) => Object.entries(o).forEach(([id, v]) => { d.$(id).value = 
   A.$('recSaved').checked = true; A.$('recSaved').dispatchEvent(new A.w.Event('change')); A.$('recGo').click();
   await A.until(() => A.ev('loggedAccount() && loggedAccount().username') === 'Zx987654@olc.com');
   assert.equal(A.ev('state.xp'), 0); assert.equal(A.ev('getAccounts().length'), 2); ok('2nd account on same device starts with its own empty data');
-  A.ev('state.xp = 5; saveState();');
+  A.ev('addXP(5); saveState();');
   const idFirst = A.ev("getAccounts().find(a=>a.username==='Sk123456@olc.com').id");
   await A.ev(`switchAccount('${idFirst}')`); await A.until(() => A.ev('loggedAccount().username') === 'Sk123456@olc.com');
-  assert.ok(A.ev('state.xp') >= 950, 'first account data intact: ' + A.ev('state.xp')); ok('switch back: accounts never mix');
+  assert.ok(A.ev('state.xp') >= 900, 'first account data intact: ' + A.ev('state.xp')); ok('switch back: accounts never mix');
   A.ev('toggleAcctMenu()'); assert.ok(A.$('acctMenu').innerHTML.includes('Zx987654@olc.com') && A.$('acctMenu').innerHTML.includes('Sk123456@olc.com')); ok('device shows all accounts for one-tap switching');
 
   // ---- uniqueness through the UI
@@ -106,7 +123,7 @@ const fill = (d, o) => Object.entries(o).forEach(([id, v]) => { d.$(id).value = 
   C.ev("renderAuth('forgot')"); fill(C, { fr_user: 'Sk123456', fr_code: code1.toLowerCase(), fr_pass: 'new-secret-7' }); C.submit('f_forgot');
   await C.until(() => C.$('olcModal').innerHTML.includes('RECOVERY CODE')); const code2 = C.$('recCode').textContent; assert.notEqual(code2, code1);
   C.$('recSaved').checked = true; C.$('recSaved').dispatchEvent(new C.w.Event('change')); C.$('recGo').click();
-  await C.until(() => C.w.document.body.classList.contains('app-on')); assert.ok(C.ev('state.xp') >= 950); ok('forgot password: new password + new code, data intact');
+  await C.until(() => C.w.document.body.classList.contains('app-on')); assert.ok(C.ev('state.xp') >= 900); ok('forgot password: new password + new code, data intact');
 
   // ---- app lock
   A.ev('savePin("4821")'); await sleep(300);
@@ -121,18 +138,18 @@ const fill = (d, o) => Object.entries(o).forEach(([id, v]) => { d.$(id).value = 
   const snap = A.store(); const R = device(snap);
   assert.ok(R.w.document.documentElement.classList.contains('locked-boot') || R.ev('locked')); assert.ok(!R.w.document.body.classList.contains('app-on')); ok('cold start with lock: PIN screen first, app not rendered');
   for (const k of '4821') await R.ev(`pinKey('${k}')`);
-  await R.until(() => R.w.document.body.classList.contains('app-on')); assert.ok(R.ev('state.xp') >= 950); ok('unlock -> app opens from local data instantly');
+  await R.until(() => R.w.document.body.classList.contains('app-on')); assert.ok(R.ev('state.xp') >= 900); ok('unlock -> app opens from local data instantly');
 
   // ---- cold start without lock opens instantly even if the server is DOWN
   const noLock = Object.assign({}, snap); delete noLock.olc2_lock;
   const realBase = BASE; BASE = 'http://127.0.0.1:1';
-  const O = device(noLock); await O.until(() => O.w.document.body.classList.contains('app-on'), 1500); assert.ok(O.ev('state.xp') >= 950); ok('opens instantly from this device even with the server unreachable');
+  const O = device(noLock); await O.until(() => O.w.document.body.classList.contains('app-on'), 1500); assert.ok(O.ev('state.xp') >= 900); ok('opens instantly from this device even with the server unreachable');
   BASE = realBase;
 
   // ---- fresh/blank guard: cleared cache must not wipe cloud data
   const wiped = Object.assign({}, C.store()); delete wiped.olc2_lock; Object.keys(wiped).filter(k => /^olc2_(state|meta|bk)_/.test(k)).forEach(k => delete wiped[k]);
   const W = device(wiped); await W.until(() => W.w.document.body.classList.contains('app-on'));
-  await W.until(() => W.ev('state.xp') >= 950, 10000); ok('cleared browser cache: cloud data comes back, blank state never overwrites it');
+  await W.until(() => W.ev('state.xp') >= 900, 10000); ok('cleared browser cache: cloud data comes back, blank state never overwrites it');
 
   // ---- rollover must not mark data as changed (it used to upload every 30 s)
   A.ev('persistLocal(); meta.dirty = false;'); A.ev('rollover(); rollover(); rollover();'); await sleep(500);

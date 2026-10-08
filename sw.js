@@ -1,58 +1,18 @@
-// OLC service worker v9
-//  - app shell (html/css/js): network first with a short timeout, so you always get the newest version
-//    when online but the app still opens instantly from cache when offline / on slow networks
-//  - images & fonts: cache first (fast, and they keep showing even if the connection drops)
-//  - the backend API is never cached
-const VERSION = 'olc-v9';
-const SHELL = ['./', './index.html', './style.css', './app.js', './auth.js', './manifest.json'];
-const CORE_ASSETS = ['assets/logo_symbol.png', 'assets/logo_text.png', 'assets/profile.png', 'assets/id_front.jpg', 'assets/id_back.jpg', 'assets/radha_krishna.jpg', 'assets/icon-192.png', 'assets/icon-512.png']
-  .concat(['agent','lance_naik','naik','sergent','cadet','lieutenant','captain','major','colonel','brigedier','commander','jawan','general','field_marshal'].map(k => 'assets/ranks/' + k + '.png'));
-
-self.addEventListener('install', (event) => {
-  event.waitUntil((async () => {
-    const cache = await caches.open(VERSION);
-    await Promise.all(SHELL.concat(CORE_ASSETS).map(u => cache.add(new Request(u, { cache: 'reload' })).catch(() => {})));
-    self.skipWaiting();
-  })());
+/* OLC service worker v10 — opens instantly from the device, updates quietly in the background */
+const VER = 'olc-v10-1';
+const SHELL = ['./', 'index.html', 'style.css', 'merge.js', 'app.js', 'blobs.js', 'v10.js', 'journal.js', 'auth.js', 'manifest.json'];
+self.addEventListener('install', (e) => { e.waitUntil(caches.open(VER).then(c => c.addAll(SHELL).catch(() => {})).then(() => self.skipWaiting())); });
+self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== VER).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
+self.addEventListener('fetch', (e) => {
+  const r = e.request;
+  if(r.method !== 'GET') return;
+  const u = new URL(r.url);
+  if(u.pathname.startsWith('/api/') || (u.origin !== location.origin)) return;     // data always goes to the network
+  // stale-while-revalidate: answer from the cache at once, refresh it in the background
+  e.respondWith(caches.open(VER).then(async (c) => {
+    const hit = await c.match(r, { ignoreSearch: true });
+    const net = fetch(r).then(res => { if(res && res.ok) c.put(r, res.clone()); return res; }).catch(() => hit);
+    return hit || net;
+  }));
 });
-
-self.addEventListener('activate', (event) => {
-  event.waitUntil((async () => {
-    const names = await caches.keys();
-    await Promise.all(names.filter(n => n !== VERSION).map(n => caches.delete(n)));
-    await self.clients.claim();
-  })());
-});
-
-const isImage = (u) => /\.(png|jpe?g|gif|webp|svg|ico)$/i.test(u.pathname);
-const isFont = (u) => u.hostname === 'fonts.gstatic.com' || u.hostname === 'fonts.googleapis.com';
-
-async function putIfGood(cache, req, res){ try{ if(res && res.ok && res.status === 200) await cache.put(req, res.clone()); }catch(e){} }
-
-function networkFirst(req, ms){
-  return caches.open(VERSION).then(async (cache) => {
-    const cached = await cache.match(req, { ignoreSearch: true });
-    const net = fetch(req).then(async (res) => { await putIfGood(cache, req, res); return res; });
-    if(!cached) return net;
-    return Promise.race([net.catch(() => cached), new Promise(r => setTimeout(() => r(cached), ms))]);
-  });
-}
-function cacheFirst(req){
-  return caches.open(VERSION).then(async (cache) => {
-    const hit = await cache.match(req, { ignoreSearch: true });
-    if(hit) return hit;
-    const res = await fetch(req);
-    await putIfGood(cache, req, res);
-    return res;
-  });
-}
-
-self.addEventListener('fetch', (event) => {
-  const req = event.request;
-  if(req.method !== 'GET') return;
-  const url = new URL(req.url);
-  if(url.pathname.startsWith('/api/') || url.hostname.endsWith('onrender.com')) return;   // never touch the backend
-  if(url.origin === location.origin && isImage(url)) { event.respondWith(cacheFirst(req).catch(() => fetch(req))); return; }
-  if(isFont(url)) { event.respondWith(cacheFirst(req).catch(() => fetch(req))); return; }
-  if(url.origin === location.origin) { event.respondWith(networkFirst(req, 2500).catch(() => caches.match(req, { ignoreSearch: true }))); }
-});
+self.addEventListener('message', (e) => { if(e.data === 'skip') self.skipWaiting(); });

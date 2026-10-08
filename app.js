@@ -26,7 +26,7 @@ const RANKS = [
   { name:'GENERAL', xp:8700 },
   { name:'FIELD MARSHAL', xp:10000 },
 ];
-function rankImg(idx, w){ return `<img src="${RANK_IMAGES[RANK_KEYS[idx]]}" style="width:${w}px; filter:drop-shadow(0 0 10px rgba(215,121,241,.5)); cursor:pointer;" onclick="openRankInfo(${idx})">`; }
+function rankImg(idx, w){ return `<img src="${RANK_IMAGES[RANK_KEYS[idx]]}" style="width:${w}px; filter:drop-shadow(0 0 10px color-mix(in srgb, var(--lavender) 50%, transparent)); cursor:pointer;" onclick="openRankInfo(${idx})">`; }
 
 /* ---------- rank groups, stars & descriptions ---------- */
 const RANK_INFO = [
@@ -86,7 +86,12 @@ const DEFAULT_STATE = {
   },
   dailyLogs:{},
   trackerLogs:{ weight:[], height:[], exercise:[], study:[], sleep:[] },
-  settings:{ waterGoal:2.5, screenLimit:180, theme:'dark', colorTheme:'violet', mode:'normal' },
+  settings:{ waterGoal:2.5, screenLimit:180, theme:'dark' },
+  xpL:{ m0:0 }, // XP ledger: one entry per device so XP earned on two devices at once both count
+  divisions:[], // [{id,division,name,logo,flag,colors,systemTheme,duration,mission,objective,books,start,end,reasonLog}]
+  activeDivisionId:null,
+  books:[], // OLC Book library: [{id,title,cover,ratio,pages:[{id,type,img,text,title}]}]
+  journal:{ title:'My OLC Journal', subtitle:'', front:{ title:'', subtitle:'', img:null, color:'' }, back:{ title:'The End', subtitle:'', img:null, color:'' }, pages:[] },
   rankOverrides:null, // null = use built-in XP thresholds; else array of 14 custom XP numbers
   customImages:{ radhaKrishna:null }, // null = use bundled default image
   ruleBookCustom:'',
@@ -219,7 +224,7 @@ function getRankInfo(xp){
   const pct = next ? clamp(into/span*100,0,100) : 100;
   return { idx, cur, next, into, span, pct, xp };
 }
-function addXP(n){ state.xp = state.xp + n; } // XP can go negative — Fail penalties must actually subtract
+function addXP(n){ const k = 'd_' + deviceId; if(!isPlain(state.xpL)) state.xpL = { m0: Number(state.xp)||0 }; state.xpL[k] = (Number(state.xpL[k])||0) + n; OLCMerge.derive(state); } // XP can go negative — Fail penalties must actually subtract
 
 /* ---------- streaks ---------- */
 function streakCheck(key, date){
@@ -491,6 +496,31 @@ function trackedCurrent(item){
 /* Checked on every render: auto-claims any connected medal/badge whose live
    progress has reached its target, logs it to Achievements, then re-baselines
    so it must grow by the target again before claiming a second time. */
+/* every achievement keeps a snapshot of WHEN / HOW / WHY it was earned, so it can be opened and read later */
+function makeAchievement(kind, item, method, extra){
+  const how = method==='auto' ? ('Tracked automatically from "'+trackLabel(item.connectionKey)+'" — reached the target of '+item.target+'.')
+    : method==='direct' ? 'Added straight to Achievements.'
+    : ('Claimed by hand after the progress bar reached its target of '+item.target+'.');
+  return Object.assign({
+    id: uid('ach'), kind, medalId: item.id, name: item.name, date: todayStr(), at: Date.now(),
+    colors: item.colors, medalImg: item.medalImg, ribbonImg: item.ribbonImg, badgeImg: item.badgeImg,
+    requirements: item.requirements||'', how, why: item.why||'', note: item.connection||'', method, target: item.target,
+    connectionKey: item.connectionKey||'manual', earnedNo: (item.timesEarned||0)+1,
+  }, extra||{});
+}
+/* standard (built-in) medals & badges are logged the first time they unlock */
+function checkStandardUnlocks(){
+  let changed = false;
+  const add = (kind, m) => {
+    const id = 'ach_std_'+kind+'_'+m.id;
+    if(!m.unlocked || state.achievements.some(a=>a.id===id)) return;
+    state.achievements.push({ id, kind, std:true, medalId:m.id, name:m.name, date:todayStr(), at:Date.now(), colors:m.ribbon,
+      requirements:m.desc, how:'Unlocked automatically: '+m.desc+'.', why:'', method:'auto', target:m.target, earnedNo:1 });
+    changed = true;
+  };
+  getMedals().forEach(m=>add('medal',m)); getBadges().forEach(b=>add('badge',b));
+  if(changed) saveState();
+}
 function checkAutoClaims(){
   if(!state) return;
   let changed = false;
@@ -501,10 +531,7 @@ function checkAutoClaims(){
     if(item.connectionBaseline===undefined){ item.connectionBaseline = v; changed = true; return; }
     const progress = Math.max(0, v - item.connectionBaseline);
     if(progress >= item.target){
-      state.achievements.unshift({
-        id: uid('ach'), kind, medalId: item.id, name: item.name, date: todayStr(),
-        colors: item.colors, medalImg: item.medalImg, ribbonImg: item.ribbonImg, badgeImg: item.badgeImg,
-      });
+      state.achievements.unshift(makeAchievement(kind, item, 'auto'));
       item.timesEarned = (item.timesEarned||0) + 1;
       item.connectionBaseline = v;
       changed = true;
@@ -561,6 +588,7 @@ function saveMedalForm(){
   const requirements = document.getElementById('mf_requirements').value.trim();
   const connection = document.getElementById('mf_connection').value.trim();
   const connectionKey = document.getElementById('mf_connectionKey').value;
+  const why = document.getElementById('mf_why').value.trim();
   const target = Math.max(1, Number(document.getElementById('mf_target').value)||1);
   const colors = [
     document.getElementById('mf_color1').value || DEFAULT_MEDAL_COLORS[0],
@@ -571,7 +599,7 @@ function saveMedalForm(){
     const m = state.customMedals.find(x=>x.id===medalForm.editId);
     if(m){
       const keyChanged = (m.connectionKey||'manual') !== connectionKey;
-      Object.assign(m, { name, requirements, connection, connectionKey, target, colors, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg });
+      Object.assign(m, { name, requirements, connection, connectionKey, target, colors, why, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg });
       if(keyChanged){
         m.connectionBaseline = connectionKey==='manual' ? undefined : trackedMetricValue(connectionKey);
         if(connectionKey==='manual') m.current = 0;
@@ -579,11 +607,11 @@ function saveMedalForm(){
     }
   } else {
     const connectionBaseline = connectionKey!=='manual' ? trackedMetricValue(connectionKey) : undefined;
-    state.customMedals.push({
-      id: uid('medal'), name, requirements, connection, connectionKey, connectionBaseline, target, current:0,
-      colors, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg,
-      timesEarned:0, createdDate: todayStr(),
-    });
+    const item = { id: uid('medal'), name, requirements, connection, connectionKey, connectionBaseline, target, current:0,
+      colors, why, medalImg: medalForm.medalImg, ribbonImg: medalForm.ribbonImg, timesEarned:0, createdDate: todayStr() };
+    const earned = document.getElementById('mf_earned');
+    if(earned && earned.checked){ const dt = document.getElementById('mf_date').value || todayStr(); state.achievements.unshift(makeAchievement('medal', item, 'direct', { date: dt })); item.timesEarned = 1; }
+    state.customMedals.push(item);
   }
   closeMedalForm();
   saveState(); renderSection();
@@ -619,10 +647,7 @@ function resetMedalTracking(id){
 function claimMedal(id){
   const m = state.customMedals.find(x=>x.id===id); if(!m) return;
   if(trackedCurrent(m) < m.target) return;
-  state.achievements.unshift({
-    id: uid('ach'), kind:'medal', medalId: m.id, name: m.name, date: todayStr(),
-    colors: m.colors, medalImg: m.medalImg, ribbonImg: m.ribbonImg,
-  });
+  state.achievements.unshift(makeAchievement('medal', m, 'manual'));
   m.timesEarned = (m.timesEarned||0) + 1;
   m.current = 0;
   saveState(); renderSection();
@@ -646,6 +671,9 @@ function medalFormHTML(){
       <select id="mf_connectionKey">${TRACK_OPTIONS.map(o=>`<option value="${o.key}" ${curKey===o.key?'selected':''}>${o.label}</option>`).join('')}</select>
     </div>
     <div class="field"><label class="f">Note <span style="font-weight:400; color:var(--dim);">(optional — shown as a tag on the card)</span></label><input type="text" id="mf_connection" value="${m?esc(m.connection||''):''}" placeholder="e.g. For staying disciplined all month"></div>
+    <div class="field"><label class="f">Why this medal matters <span style="font-weight:400; color:var(--dim);">(shown in Achievements when you open it)</span></label><textarea id="mf_why" rows="2" placeholder="e.g. Proof that I can keep a promise to myself">${m?esc(m.why||''):''}</textarea></div>
+    ${editing?'':`<label class="f" style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="mf_earned" onchange="document.getElementById('mf_date').style.display=this.checked?'block':'none'"> Already earned — put it straight into Achievements</label>
+    <input type="date" id="mf_date" value="${todayStr()}" style="display:none; margin:6px 0 10px;">`}
 
     <label class="f">Ribbon Colors <span style="font-weight:400; color:var(--dim);">(used when no custom image is uploaded)</span></label>
     <div style="display:flex; gap:10px; margin-bottom:12px;">
@@ -709,6 +737,7 @@ function saveBadgeForm(){
   const requirements = document.getElementById('bf_requirements').value.trim();
   const connection = document.getElementById('bf_connection').value.trim();
   const connectionKey = document.getElementById('bf_connectionKey').value;
+  const why = document.getElementById('bf_why').value.trim();
   const target = Math.max(1, Number(document.getElementById('bf_target').value)||1);
   const colors = [
     document.getElementById('bf_color1').value || DEFAULT_MEDAL_COLORS[0],
@@ -719,7 +748,7 @@ function saveBadgeForm(){
     const b = state.customBadges.find(x=>x.id===badgeForm.editId);
     if(b){
       const keyChanged = (b.connectionKey||'manual') !== connectionKey;
-      Object.assign(b, { name, requirements, connection, connectionKey, target, colors, badgeImg: badgeForm.badgeImg });
+      Object.assign(b, { name, requirements, connection, connectionKey, target, colors, why, badgeImg: badgeForm.badgeImg });
       if(keyChanged){
         b.connectionBaseline = connectionKey==='manual' ? undefined : trackedMetricValue(connectionKey);
         if(connectionKey==='manual') b.current = 0;
@@ -727,10 +756,11 @@ function saveBadgeForm(){
     }
   } else {
     const connectionBaseline = connectionKey!=='manual' ? trackedMetricValue(connectionKey) : undefined;
-    state.customBadges.push({
-      id: uid('badge'), name, requirements, connection, connectionKey, connectionBaseline, target, current:0,
-      colors, badgeImg: badgeForm.badgeImg, timesEarned:0, createdDate: todayStr(),
-    });
+    const item = { id: uid('badge'), name, requirements, connection, connectionKey, connectionBaseline, target, current:0,
+      colors, why, badgeImg: badgeForm.badgeImg, timesEarned:0, createdDate: todayStr() };
+    const earned = document.getElementById('bf_earned');
+    if(earned && earned.checked){ const dt = document.getElementById('bf_date').value || todayStr(); state.achievements.unshift(makeAchievement('badge', item, 'direct', { date: dt })); item.timesEarned = 1; }
+    state.customBadges.push(item);
   }
   closeBadgeForm();
   saveState(); renderSection();
@@ -760,7 +790,7 @@ function resetBadgeTracking(id){
 function claimBadge(id){
   const b = state.customBadges.find(x=>x.id===id); if(!b) return;
   if(trackedCurrent(b) < b.target) return;
-  state.achievements.unshift({ id: uid('ach'), kind:'badge', medalId: b.id, name: b.name, date: todayStr(), colors: b.colors, badgeImg: b.badgeImg });
+  state.achievements.unshift(makeAchievement('badge', b, 'manual'));
   b.timesEarned = (b.timesEarned||0) + 1;
   b.current = 0;
   saveState(); renderSection();
@@ -784,6 +814,9 @@ function badgeFormHTML(){
       <select id="bf_connectionKey">${TRACK_OPTIONS.map(o=>`<option value="${o.key}" ${curKey===o.key?'selected':''}>${o.label}</option>`).join('')}</select>
     </div>
     <div class="field"><label class="f">Note <span style="font-weight:400; color:var(--dim);">(optional — shown as a tag on the card)</span></label><input type="text" id="bf_connection" value="${b?esc(b.connection||''):''}" placeholder="e.g. Marksmanship training"></div>
+    <div class="field"><label class="f">Why this badge matters <span style="font-weight:400; color:var(--dim);">(shown in Achievements when you open it)</span></label><textarea id="bf_why" rows="2" placeholder="e.g. Shows I stayed consistent in this field">${b?esc(b.why||''):''}</textarea></div>
+    ${editing?'':`<label class="f" style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="bf_earned" onchange="document.getElementById('bf_date').style.display=this.checked?'block':'none'"> Already earned — put it straight into Achievements</label>
+    <input type="date" id="bf_date" value="${todayStr()}" style="display:none; margin:6px 0 10px;">`}
 
     <label class="f">Badge Colors <span style="font-weight:400; color:var(--dim);">(used when no custom image is uploaded)</span></label>
     <div style="display:flex; gap:10px; margin-bottom:12px;">
@@ -812,9 +845,11 @@ function rollover(){ const t=todayStr(); const had = !!(state && state.dailyLogs
 function go(sec){
   currentSection = sec;
   editingTracker = { name:null, index:null };
-  if(sec!=='medals') medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null };
-  if(sec!=='badges') badgeForm = { open:false, editId:null, badgeImg:null };
-  if(sec==='rulebook') fbIndex = 0;
+  if(sec==='badges'){ sec = 'medals'; medalTab = 'badges'; currentSection = 'medals'; }
+  else if(sec==='medals') medalTab = 'medals';
+  if(sec==='rulebook'){ sec = 'books'; currentSection = 'books'; }
+  if(sec!=='medals'){ medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null }; badgeForm = { open:false, editId:null, badgeImg:null }; }
+  if(sec==='books') openBookId = null;
   document.querySelectorAll('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.sec===sec));
   renderSection();
   document.getElementById('sidebar').classList.remove('open');
@@ -838,10 +873,10 @@ function openRKModal(){ document.getElementById('rkModal').style.display = 'flex
 function closeRKModal(){ document.getElementById('rkModal').style.display = 'none'; }
 
 function renderSection(){
-  checkAutoClaims();
+  checkAutoClaims(); checkStandardUnlocks();
   const map = { home:secHome, dashboard:secDashboard, profile:secProfile, mission:secMission,
     streaks:secStreaks, daily:secDaily, trackers:secTrackers, rank:secRank, medals:secMedals,
-    achievements:secAchievements, badges:secBadges, rulebook:secRulebook, archives:secArchives };
+    achievements:secAchievements, badges:secMedals, rulebook:secBooks, books:secBooks, journal:secJournal, divisions:secDivisions, archives:secArchives };
   const fn = map[currentSection] || secHome;
   let html;
   try{ html = fn(); }
@@ -851,7 +886,8 @@ function renderSection(){
   }
   document.getElementById('mainContent').innerHTML = html;
   renderTopbar();
-  if(currentSection==='rulebook') fbRenderBase();
+  if(currentSection==='books') bookAfterRender();
+  if(typeof Blobs!=='undefined') Blobs.hydrate(document.getElementById('mainContent'));
 }
 function renderAll(){ renderTopbar(); renderSection(); }
 
@@ -885,7 +921,10 @@ function secHome(){
     <h2>MISSION OVERVIEW</h2>
     <div class="sub">${fmtDateLong(t)}</div>
   </div>
-  <img src="${currentRKImage()}" alt="Radha Krishna" onclick="openRKModal()" style="float:right; width:230px; max-width:48vw; border-radius:14px; border:1px solid var(--border-strong); box-shadow:0 10px 30px rgba(0,0,0,.45); margin:-60px 0 14px 16px; cursor:pointer;">
+  <div class="rk-side">
+    <img src="${currentRKImage()}" alt="Radha Krishna" onclick="openRKModal()" class="rk-side-img">
+    ${divisionFlagHTML()}
+  </div>
 
   <div class="grid c3" style="align-items:stretch;">
     <div class="panel" style="text-align:center;">
@@ -1018,8 +1057,9 @@ function secProfile(){
   <div class="pagehead"><h2>AGENT PROFILE</h2><div class="sub">CLASSIFIED — COMMAND EYES ONLY</div></div>
   <div class="grid c2">
     <div class="panel" style="text-align:center;">
-      <img src="${currentProfilePhoto()}" alt="Agent" onclick="openPhotoModal()" style="width:150px; height:150px; object-fit:cover; border-radius:50%; border:3px solid var(--border-strong); box-shadow:0 0 24px rgba(215,121,241,.4); cursor:pointer;">
+      <img src="${currentProfilePhoto()}" alt="Agent" onclick="openPhotoModal()" style="width:150px; height:150px; object-fit:cover; border-radius:50%; border:3px solid var(--border-strong); box-shadow:0 0 24px color-mix(in srgb, var(--lavender) 40%, transparent); cursor:pointer;">
       <div class="stat-label" style="margin-top:6px;">TAP PHOTO TO ENLARGE</div>
+      ${profileDivisionHTML()}
       ${(()=>{
         const autoUnlocked = getMedals().filter(m=>m.unlocked);
         const earnedCustom = (state.customMedals||[]).filter(m=>m.timesEarned>0);
@@ -1257,7 +1297,7 @@ function lineChartSVG(log, field){
   const range = (max-min)||1;
   const W=280,H=70,pad=6;
   const pts = vals.map((v,i)=> [pad + i*(W-2*pad)/(vals.length-1), H-pad - ( (v-min)/range )*(H-2*pad) ].join(',')).join(' ');
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%; margin-top:10px;"><polyline points="${pts}" fill="none" stroke="#01c4c4" stroke-width="2"/></svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%; margin-top:10px;"><polyline points="${pts}" fill="none" stroke="var(--cyan)" stroke-width="2"/></svg>`;
 }
 function withIdx(arr){ return arr.map((e,i)=>Object.assign({_i:i}, e)); }
 function sortedDesc(arr){ return withIdx(arr).sort((a,b)=> a.date<b.date?1:(a.date>b.date?-1:b._i-a._i)); }
@@ -1473,14 +1513,14 @@ function saveSleepLog(){
 function saveWeightLog(){
   const kg=Number(document.getElementById('wt_kg').value); const date=document.getElementById('wt_date').value||todayStr();
   if(!kg) return;
-  if(editingTracker.name==='weight'){ state.trackerLogs.weight[editingTracker.index] = {date, kg}; editingTracker={name:null,index:null}; }
+  if(editingTracker.name==='weight'){ state.trackerLogs.weight[editingTracker.index] = Object.assign({}, state.trackerLogs.weight[editingTracker.index], {date, kg}); editingTracker={name:null,index:null}; }
   else state.trackerLogs.weight.push({date, kg});
   saveState(); renderSection();
 }
 function saveHeightLog(){
   const cm=Number(document.getElementById('ht_cm').value); const date=document.getElementById('ht_date').value||todayStr();
   if(!cm) return;
-  if(editingTracker.name==='height'){ state.trackerLogs.height[editingTracker.index] = {date, cm}; editingTracker={name:null,index:null}; }
+  if(editingTracker.name==='height'){ state.trackerLogs.height[editingTracker.index] = Object.assign({}, state.trackerLogs.height[editingTracker.index], {date, cm}); editingTracker={name:null,index:null}; }
   else state.trackerLogs.height.push({date, cm});
   saveState(); renderSection();
 }
@@ -1537,7 +1577,7 @@ function secRank(){
       const next = ranks[i+1];
       const rangeTxt = next ? `${r.xp} – ${next.xp-1} XP` : `${r.xp}+ XP`;
       const info = RANK_INFO[i];
-      return `<div class="panel" style="text-align:center; ${rankEditMode?'':'cursor:pointer;'} ${achieved?'':'opacity:.4; filter:grayscale(.6);'} ${isCurrent?'box-shadow:0 0 22px rgba(215,121,241,.5); border-color:var(--lavender);':''}" ${rankEditMode?'':`onclick="openRankInfo(${i})"`}>
+      return `<div class="panel" style="text-align:center; ${rankEditMode?'':'cursor:pointer;'} ${achieved?'':'opacity:.4; filter:grayscale(.6);'} ${isCurrent?'box-shadow:0 0 22px color-mix(in srgb, var(--lavender) 50%, transparent); border-color:var(--lavender);':''}" ${rankEditMode?'':`onclick="openRankInfo(${i})"`}>
         <div class="tag">TIER ${i+1}</div>
         <div class="rankbadge" style="margin:10px auto;">${rankImg(i,42)}</div>
         <div style="font-family:'Orbitron'; font-size:12px; color:${isCurrent?'var(--lavender)':'var(--white)'};">${r.name}</div>
@@ -1555,11 +1595,18 @@ function secRank(){
 /* ========================================================
    SECTION: MEDALS
 ======================================================== */
+let medalTab = 'medals';
+function setMedalTab(t){ medalTab = t; if(t!=='medals') medalForm = { open:false, editId:null, medalImg:null, ribbonImg:null }; if(t!=='badges') badgeForm = { open:false, editId:null, badgeImg:null }; renderSection(); }
+function medalTabsHTML(){
+  return `<div class="tabs" role="tablist"><button class="tab ${medalTab==='medals'?'active':''}" onclick="setMedalTab('medals')">🎖 Medals</button><button class="tab ${medalTab==='badges'?'active':''}" onclick="setMedalTab('badges')">◉ Badges</button><button class="tab" onclick="go('achievements')">🏆 Achievements →</button></div>`;
+}
 function secMedals(){
+  if(medalTab==='badges') return secBadges();
   const medals = state.customMedals || [];
   const autoMedals = getMedals();
   return `
   <div class="pagehead"><h2>MEDALS &amp; AWARDS</h2><div class="sub">DESIGN YOUR OWN DECORATIONS</div></div>
+  ${medalTabsHTML()}
 
   <div class="panel">
     <button class="btn" onclick="openAddMedalForm()">+ Add Medal</button>
@@ -1625,19 +1672,64 @@ function secMedals(){
 /* ========================================================
    SECTION: ACHIEVEMENTS — permanent record of every claimed medal/badge
 ======================================================== */
-function secAchievements(){
-  const list = state.achievements || [];
-  return `
-  <div class="pagehead"><h2>ACHIEVEMENTS</h2><div class="sub">EVERY MEDAL &amp; BADGE EVER EARNED — PERMANENT RECORD</div></div>
-  <div class="panel">
-    ${list.length ? `
-    <table>
-      <tr><th>Date</th><th>Type</th><th>Name</th></tr>
-      ${list.map(a=>`<tr><td>${a.date}</td><td>${a.kind==='badge'?'Badge':'Medal'}</td><td><span style="display:inline-flex; align-items:center; gap:8px;">${a.kind==='badge' ? (a.badgeImg?`<img src="${a.badgeImg}" style="width:24px;height:24px;object-fit:contain;">`:medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,false)) : (a.medalImg?`<img src="${a.medalImg}" style="width:24px;height:24px;object-fit:contain;">`:medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,true))} ${esc(a.name)}</span></td></tr>`).join('')}
-    </table>` : '<div class="empty">No medals or badges claimed yet. Head to Medals &amp; Awards or the Badge System to create and earn your first one.</div>'}
-  </div>
-  `;
+function achGraphic(a, size){
+  size = size||40;
+  a = Object.assign({}, a, { colors: Array.isArray(a.colors) ? a.colors : DEFAULT_MEDAL_COLORS });
+  if(a.kind==='badge') return a.badgeImg ? `<img src="${a.badgeImg}" style="width:${size}px;height:${size}px;object-fit:contain;border-radius:8px;">` : medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,false);
+  return a.medalImg ? `<img src="${a.medalImg}" style="width:${size}px;height:${size}px;object-fit:contain;border-radius:50%;">` : medalSVG(a.colors||DEFAULT_MEDAL_COLORS,true,false);
 }
+function secAchievements(){
+  const list = (state.achievements||[]).slice().sort((x,y)=> (y.at||0)-(x.at||0) || (x.date<y.date?1:-1));
+  const medalsN = list.filter(a=>a.kind!=='badge').length, badgesN = list.length-medalsN;
+  return `
+  <div class="pagehead"><h2>ACHIEVEMENTS</h2><div class="sub">EVERY MEDAL &amp; BADGE EVER EARNED — TAP ONE TO SEE WHEN, HOW AND WHY</div></div>
+  <div class="grid c3" style="margin-bottom:14px;">
+    <div class="panel" style="text-align:center;"><div class="eyebrow">TOTAL</div><div class="stat-big" style="font-size:30px;">${list.length}</div></div>
+    <div class="panel" style="text-align:center;"><div class="eyebrow">MEDALS</div><div class="stat-big" style="font-size:30px;">${medalsN}</div></div>
+    <div class="panel" style="text-align:center;"><div class="eyebrow">BADGES</div><div class="stat-big" style="font-size:30px;">${badgesN}</div></div>
+  </div>
+  <div class="panel">
+    ${list.length ? `<div class="ach-list">${list.map(a=>`
+      <button class="ach-row" onclick="openAchievement('${a.id}')">
+        <span class="ach-ic">${achGraphic(a,38)}</span>
+        <span class="ach-main"><b>${esc(a.name)}</b><small>${a.kind==='badge'?'Badge':'Medal'} · ${a.date}${a.earnedNo>1?' · earned '+a.earnedNo+'×':''}</small></span>
+        <span class="ach-go">›</span>
+      </button>`).join('')}</div>` : '<div class="empty">No medals or badges earned yet. Open Medals &amp; Awards (Medals or Badges tab) to create and earn your first one.</div>'}
+  </div>`;
+}
+function openAchievement(id){
+  const a = (state.achievements||[]).find(x=>x.id===id); if(!a) return;
+  const src = (a.kind==='badge' ? (state.customBadges||[]) : (state.customMedals||[])).find(x=>x.id===a.medalId);
+  const when = a.at ? new Date(a.at).toLocaleString(undefined,{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit'}) : fmtDateLong(a.date);
+  const requirements = a.requirements || (src&&src.requirements) || '';
+  const why = a.why || (src&&src.why) || '';
+  document.getElementById('achBody').innerHTML = `
+    <div style="text-align:center;"><div class="ach-big">${achGraphic(a,96)}</div>
+    <h3 style="justify-content:center; margin:10px 0 2px;">${esc(a.name)}</h3>
+    <div class="tag">${a.kind==='badge'?'BADGE':'MEDAL'}${a.std?' · STANDARD':''}${a.earnedNo>1?' · EARNED '+a.earnedNo+'×':''}</div></div>
+    <div class="ach-facts">
+      <div><div class="eyebrow">WHEN</div><div>${esc(when)}${a.std?'<div class="stat-label">First noticed as unlocked on this date</div>':''}</div></div>
+      <div><div class="eyebrow">HOW</div><div>${esc(a.how||'—')}${requirements?`<div class="stat-label" style="margin-top:6px;">REQUIREMENT: ${esc(requirements)}</div>`:''}</div></div>
+      <div><div class="eyebrow">WHY</div><div id="achWhyView">${why?esc(why):'<span style="color:var(--dim)">No reason written yet.</span>'}</div>
+        <textarea id="achWhyEdit" rows="3" style="display:none; margin-top:6px;" placeholder="Why does this matter to you?">${esc(why)}</textarea></div>
+    </div>
+    <div style="display:flex; gap:8px; justify-content:center; margin-top:14px; flex-wrap:wrap;">
+      <button class="btn sm" id="achEditBtn" onclick="achEditWhy('${a.id}')">✎ Write / edit the reason</button>
+      <button class="btn ghost sm" onclick="deleteAchievement('${a.id}')">Remove record</button>
+    </div>`;
+  document.getElementById('achModal').style.display='flex';
+}
+function achEditWhy(id){
+  const ta=document.getElementById('achWhyEdit'), btn=document.getElementById('achEditBtn');
+  if(ta.style.display==='none'){ ta.style.display='block'; document.getElementById('achWhyView').style.display='none'; btn.textContent='Save reason'; ta.focus(); return; }
+  const a=state.achievements.find(x=>x.id===id); if(!a) return;
+  a.why = ta.value.trim(); saveState(); openAchievement(id);
+}
+function deleteAchievement(id){
+  if(!confirm('Remove this achievement record? (The medal/badge itself is not deleted.)')) return;
+  state.achievements = state.achievements.filter(x=>x.id!==id); saveState(); closeAchModal(); renderSection();
+}
+function closeAchModal(){ document.getElementById('achModal').style.display='none'; }
 
 /* ========================================================
    SECTION: BADGES (Side Arm Badge System)
@@ -1646,11 +1738,12 @@ function secBadges(){
   const badges = state.customBadges || [];
   const autoBadges = getBadges();
   return `
-  <div class="pagehead"><h2>SIDE ARM BADGE SYSTEM</h2><div class="sub">DESIGN YOUR OWN SPECIALIZATIONS</div></div>
+  <div class="pagehead"><h2>BADGES</h2><div class="sub">PART OF MEDALS &amp; AWARDS — EVERY EARNED BADGE IS LOGGED IN ACHIEVEMENTS</div></div>
+  ${medalTabsHTML()}
 
   <div class="panel">
     <button class="btn" onclick="openAddBadgeForm()">+ Add Badge</button>
-    <p class="stat-label" style="margin-top:10px; line-height:1.6;">Same idea as Medals, but image-only — no ribbon. Name it, set requirements and a target, and optionally connect it to a real streak or stat for auto-claim. Claims are logged forever in Achievements and the bar resets so it can be earned again.</p>
+    <p class="stat-label" style="margin-top:10px; line-height:1.6;">Same idea as Medals, but image-only — no ribbon. Name it, set requirements and a target, and optionally connect it to a real streak or stat for auto-claim. Claims are logged forever in Achievements (open any one there to see when, how and why you earned it) and the bar resets so it can be earned again.</p>
   </div>
 
   ${badgeForm.open ? badgeFormHTML() : ''}
@@ -1716,124 +1809,7 @@ function secBadges(){
 }
 
 
-/* ========================================================
-   SECTION: RULE BOOK — real page-flip book (actual PDF pages)
-======================================================== */
-let fbIndex = 0;
-let fbAnimating = false;
-
-function secRulebook(){
-  const pages = rbPages();
-  const notes = (state.ruleBookNotes||[]).slice().sort((a,b)=>a.date<b.date?1:-1);
-  return `
-  <div class="pagehead"><h2>THE RULE BOOK</h2><div class="sub">THE OFFICIAL OPERATING MANUAL OF AGENT SK &amp; OLC — v1.0</div></div>
-  <div class="panel flipbook-wrap">
-    <div class="flipbook" id="flipbook"></div>
-    <div class="fb-controls">
-      <button class="fb-navbtn" id="fbPrev" onclick="fbTurn(-1)">‹</button>
-      <div class="fb-pagenum" id="fbPageNum">Page 1 / ${pages.length}</div>
-      <button class="fb-navbtn" id="fbNext" onclick="fbTurn(1)">›</button>
-    </div>
-    <div style="display:flex; gap:8px; justify-content:center; align-items:center; margin-top:10px;">
-      <label class="stat-label" style="margin:0;">Jump to page</label>
-      <input type="number" id="fbJump" min="1" max="${pages.length}" style="width:70px; text-align:center;" placeholder="#">
-      <button class="btn ghost sm" onclick="fbJumpTo()">Go</button>
-    </div>
-    <div class="idcard-hint" style="margin-top:6px;">CLICK THE ARROWS, USE ← / → KEYS, OR JUMP TO A PAGE NUMBER</div>
-    <div style="display:flex; gap:8px; justify-content:center; margin-top:14px; flex-wrap:wrap;">
-      <label class="btn ghost sm" style="cursor:pointer;">Upload Page<input type="file" accept="image/*" style="display:none;" onchange="uploadRulebookPage(this)"></label>
-      <button class="btn ghost sm" onclick="deleteRulebookPage(fbIndex)">Delete This Page</button>
-      <button class="btn ghost sm" onclick="resetRulebookToDefault()">Reset To Original</button>
-    </div>
-    <div class="stat-label" style="text-align:center; margin-top:8px;">Uploaded pages replace or extend the book — delete originals or add your own, it's yours to edit.</div>
-  </div>
-  <div class="panel" style="margin-top:16px;">
-    <h3><span class="ic">✎</span>PERSONAL AMENDMENTS</h3>
-    <textarea id="rb_custom" rows="4" placeholder="Add a new amendment to the constitution, dated today..."></textarea>
-    <button class="btn sm" style="margin-top:8px;" onclick="addRuleBookNote()">Add Amendment</button>
-    <div style="margin-top:14px;">
-      ${notes.length ? notes.map(n=>`
-      <div class="timeline-item">
-        <div style="flex:1;">
-          <div class="mono" style="color:var(--cyan); font-size:12px;">${n.date}</div>
-          <div>${esc(n.text)}</div>
-        </div>
-        <button class="btn ghost sm" onclick="deleteRuleBookNote('${n.id}')">🗑</button>
-      </div>`).join('') : '<div class="empty">No amendments yet</div>'}
-    </div>
-  </div>
-  `;
-}
-function fbRenderBase(){
-  const el = document.getElementById('flipbook');
-  if(!el) return;
-  const pages = rbPages();
-  if(fbIndex >= pages.length) fbIndex = Math.max(0, pages.length-1);
-  if(!pages.length){ el.innerHTML = '<div class="empty" style="padding:30px;">No pages — upload one to get started</div>'; return; }
-  el.innerHTML = `<div class="fb-page"><img src="${pages[fbIndex]}"></div>`;
-  document.getElementById('fbPageNum').textContent = `Page ${fbIndex+1} / ${pages.length}`;
-  document.getElementById('fbPrev').disabled = fbIndex<=0;
-  document.getElementById('fbNext').disabled = fbIndex>=pages.length-1;
-}
-function fbJumpTo(){
-  const pages = rbPages();
-  const val = Number(document.getElementById('fbJump').value);
-  if(!val || val<1 || val>pages.length) return;
-  fbIndex = val-1;
-  fbRenderBase();
-}
-document.addEventListener('keydown', (e)=>{
-  if(currentSection!=='rulebook') return;
-  if(e.target && ['TEXTAREA','INPUT'].includes(e.target.tagName)) return;
-  if(e.key==='ArrowLeft') fbTurn(-1);
-  else if(e.key==='ArrowRight') fbTurn(1);
-});
-function fbTurn(dir){
-  if(fbAnimating) return;
-  const pages = rbPages();
-  const next = fbIndex + dir;
-  if(next<0 || next>=pages.length) return;
-  fbAnimating = true;
-  const el = document.getElementById('flipbook');
-  const flip = document.createElement('div');
-  flip.className = 'fb-flip';
-  flip.innerHTML = `
-    <div class="fb-face fb-front"><img src="${pages[fbIndex]}"></div>
-    <div class="fb-face fb-back"><img src="${pages[next]}"></div>`;
-  el.appendChild(flip);
-  void flip.offsetWidth;
-  flip.classList.add(dir>0 ? 'turning-fwd' : 'turning-back');
-  setTimeout(()=>{
-    fbIndex = next;
-    fbAnimating = false;
-    fbRenderBase();
-  }, 680);
-}
-async function uploadRulebookPage(input){
-  const file = input.files && input.files[0]; if(!file) return;
-  try{
-    const dataUrl = await fileToCompressedDataURL(file, 750, 0.72);
-    ensureCustomRulebook();
-    state.rulebookPages.push(dataUrl);
-    fbIndex = state.rulebookPages.length - 1;
-    saveState(); renderSection();
-  }catch(e){ alert('Could not read that image — try a different file.'); }
-}
-function deleteRulebookPage(idx){
-  const pages = rbPages();
-  if(!pages.length) return;
-  if(!confirm('Delete this page from the Rule Book?')) return;
-  ensureCustomRulebook();
-  state.rulebookPages.splice(idx,1);
-  if(fbIndex >= state.rulebookPages.length) fbIndex = Math.max(0, state.rulebookPages.length-1);
-  saveState(); renderSection();
-}
-function resetRulebookToDefault(){
-  if(!confirm('Reset the Rule Book back to the original OLC pages? Any pages you uploaded or deleted will be lost.')) return;
-  state.rulebookPages = null;
-  fbIndex = 0;
-  saveState(); renderSection();
-}
+/* The Rule Book is now part of the OLC Book library (books.js section in v10.js). Amendments below belong to it. */
 function addRuleBookNote(){
   const text = document.getElementById('rb_custom').value.trim();
   if(!text) return;
@@ -1934,6 +1910,8 @@ function secArchives(){
    THEME
 ======================================================== */
 function setTheme(theme){
+  const d = (typeof activeDivision === 'function') ? activeDivision() : null;
+  if(d && d.systemTheme && d.systemTheme !== 'auto' && theme !== d.systemTheme){ toast('The active Division "' + (d.name||d.division) + '" keeps the system in ' + d.systemTheme + ' mode. Switch the Division off to change it.', 4200); return; }
   state.settings.theme = theme;
   document.documentElement.setAttribute('data-theme', theme);
   document.getElementById('themeBtnDark')?.classList.toggle('active', theme==='dark');
@@ -1941,46 +1919,12 @@ function setTheme(theme){
   saveState();
 }
 
-const COLOR_THEMES = [
-  { id:'violet', label:'Violet (Classic)', swatch:'#d779f1' },
-  { id:'ocean', label:'Ocean', swatch:'#3fa9f5' },
-  { id:'emerald', label:'Emerald', swatch:'#22c55e' },
-  { id:'crimson', label:'Crimson', swatch:'#ef4444' },
-  { id:'amber', label:'Amber', swatch:'#f5a623' },
-  { id:'rose', label:'Rose', swatch:'#ec4899' },
-  { id:'mono', label:'Mono', swatch:'#b5b5c0' },
-];
-function setColorTheme(id){
-  state.settings.colorTheme = id;
-  if(id==='violet') document.documentElement.removeAttribute('data-color');
-  else document.documentElement.setAttribute('data-color', id);
-  saveState();
-  renderColorSwatches();
-}
-function renderColorSwatches(){
-  const el = document.getElementById('colorSwatches');
-  if(!el) return;
-  const active = (state && state.settings.colorTheme) || 'violet';
-  el.innerHTML = COLOR_THEMES.map(c=>`
-    <div class="panel" style="text-align:center; cursor:pointer; padding:12px; ${active===c.id?'border-color:var(--lavender); box-shadow:0 0 14px rgba(215,121,241,.4);':''}" onclick="setColorTheme('${c.id}')">
-      <div style="width:36px; height:36px; border-radius:50%; background:${c.swatch}; margin:0 auto 8px; border:2px solid rgba(255,255,255,.3);"></div>
-      <div style="font-size:12px;">${c.label}</div>
-    </div>`).join('');
-}
-function openThemeModal(){ document.getElementById('themeModal').style.display='flex'; renderColorSwatches(); }
-function closeThemeModal(){ document.getElementById('themeModal').style.display='none'; }
+/* Colour choices were replaced by Divisions (see v10.js): the active Division sets the theme of the whole system. */
+function openThemeModal(){ openDivisionSwitcher(); }
+function closeThemeModal(){ const m = document.getElementById('themeModal'); if(m) m.style.display='none'; }
 
-/* ========================================================
-   MONK MODE — a calmer, distraction-reduced focus view
-======================================================== */
-function applyMonkMode(mode){
-  state.settings.mode = mode;
-  document.documentElement.classList.toggle('monk-mode', mode==='monk');
-  const btn = document.getElementById('modeBtn');
-  if(btn) btn.textContent = mode==='monk' ? '🏠 Normal Mode' : '🧘 Monk Mode';
-  saveState();
-}
-function toggleMonkMode(){ applyMonkMode(state.settings.mode==='monk' ? 'normal' : 'monk'); }
+/* Monk Mode was removed in v10. */
+function applyMonkMode(){ document.documentElement.classList.remove('monk-mode'); }
 
 /* ========================================================
    ID CARD 3D FLIP MODAL
@@ -2021,7 +1965,7 @@ function openRankInfo(idx){
   const rangeTxt = next ? `${r.xp} – ${next.xp-1} XP` : `${r.xp}+ XP`;
   document.getElementById('rankInfoBody').innerHTML = `
     <div style="text-align:center;">
-      <img src="${RANK_IMAGES[RANK_KEYS[idx]]}" style="width:90px; filter:drop-shadow(0 0 14px rgba(215,121,241,.6));">
+      <img src="${RANK_IMAGES[RANK_KEYS[idx]]}" style="width:90px; filter:drop-shadow(0 0 14px color-mix(in srgb, var(--lavender) 60%, transparent));">
       <h3 style="justify-content:center; margin-top:10px; color:var(--lavender);">${r.name}</h3>
       <div style="display:flex; gap:8px; justify-content:center; margin:10px 0; flex-wrap:wrap;">
         <div class="tag">TIER ${idx+1} / 14</div>
@@ -2127,3 +2071,6 @@ function initInstallButtonVisibility(){
 }
 
 // startup is handled by auth.js (boot())
+
+window.OLC_BUSY = window.OLC_BUSY || [];
+window.OLC_BUSY.push(() => medalForm.open || badgeForm.open);

@@ -12,10 +12,13 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { init } = require('./db');
+const Merge = require('./merge');
 
 const PORT = process.env.PORT || 4000;
 const ADMIN_KEY = process.env.OLC_ADMIN_KEY || '';
-const VERSION = '2.0.0';
+const VERSION = '3.0.0';
+const MAX_BLOB_BYTES = 40 * 1024 * 1024;
+const MAX_USER_BLOB_BYTES = (Number(process.env.OLC_BLOB_QUOTA_MB) || 300) * 1024 * 1024;
 
 /* ---------------- validation (mirrored in frontend/auth.js) ---------------- */
 const SUFFIX = '@olc.com';
@@ -100,6 +103,7 @@ function stateWeight(s) {
   if (s.trackerLogs) for (const k of Object.keys(s.trackerLogs)) w += (s.trackerLogs[k] || []).length;
   if (s.customMedals) w += s.customMedals.length;
   if (s.customBadges) w += s.customBadges.length;
+  if (s.divisions) w += s.divisions.length;
   if (s.achievements) w += s.achievements.length;
   if (s.profile && (s.profile.name || s.profile.photo)) w += 1;
   return w;
@@ -113,7 +117,7 @@ async function main() {
   const app = express();
   app.set('trust proxy', 1);
   app.use(cors());
-  app.use(express.json({ limit: '25mb' }));
+  app.use(express.json({ limit: '30mb' }));
 
   const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
   const fail = (res, status, error, extra) => res.status(status).json(Object.assign({ error }, extra || {}));
@@ -132,7 +136,7 @@ async function main() {
   async function stateOut(userId) {
     const r = await db.query(`SELECT data, updated_at, version FROM states WHERE user_id=$1`, [userId]);
     if (!r.rows.length) return { state: null, updatedAt: 0 };
-    return { state: safeParse(r.rows[0].data), updatedAt: Number(r.rows[0].updated_at), version: r.rows[0].version };
+    return { state: safeParse(r.rows[0].data), updatedAt: Number(r.rows[0].updated_at), version: Number(r.rows[0].version) };
   }
 
   /* ---------- auth middleware ---------- */
@@ -202,7 +206,7 @@ async function main() {
     hits.delete(key);
     const token = await newSession(u.id, device);
     const st = await stateOut(u.id);
-    res.json({ token, user: userOut(u), state: st.state, updatedAt: st.updatedAt });
+    res.json({ token, user: userOut(u), state: st.state, updatedAt: st.updatedAt, v: st.version || 0 });
   }));
 
   app.post('/api/recover', wrap(async (req, res) => {
@@ -225,7 +229,7 @@ async function main() {
     await db.query(`DELETE FROM sessions WHERE user_id=$1`, [u.id]);
     const token = await newSession(u.id, device);
     const st = await stateOut(u.id);
-    res.json({ token, user: userOut(u), recoveryCode: recovery, state: st.state, updatedAt: st.updatedAt });
+    res.json({ token, user: userOut(u), recoveryCode: recovery, state: st.state, updatedAt: st.updatedAt, v: st.version || 0 });
   }));
 
   /* ---------- signed-in: account ---------- */
@@ -280,12 +284,37 @@ async function main() {
     res.json({ ok: true });
   }));
 
-  /* ---------- signed-in: data sync ---------- */
-  app.get('/api/state', auth, wrap(async (req, res) => {
+  /* ---------- live updates (so a change on the laptop shows on the phone within a second) ---------- */
+  const listeners = new Map();   // userId -> Set(res)
+  function broadcast(userId, payload, exceptDevice) {
+    const set = listeners.get(userId); if (!set) return;
+    const line = 'data: ' + JSON.stringify(payload) + '\n\n';
+    for (const r of set) { if (exceptDevice && r.olcDevice === exceptDevice) continue; try { r.write(line); } catch (e) { /* closed */ } }
+  }
+  app.get('/api/events', auth, (req, res) => {
+    res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders && res.flushHeaders();
+    res.olcDevice = String(req.query.device || '').slice(0, 40);
+    if (!listeners.has(req.user.id)) listeners.set(req.user.id, new Set());
+    listeners.get(req.user.id).add(res);
+    res.write('retry: 4000\n\ndata: {"hello":1}\n\n');
+    const hb = setInterval(() => { try { res.write(': hb\n\n'); } catch (e) {} }, 20000);
+    req.on('close', () => { clearInterval(hb); const set = listeners.get(req.user.id); if (set) { set.delete(res); if (!set.size) listeners.delete(req.user.id); } });
+  });
+
+  /* ---------- signed-in: data sync (field-by-field merge — nothing is ever replaced wholesale) ---------- */
+  app.get('/api/state', auth, wrap(async (req, res) => {          // legacy read (kept so old copies can still read)
     const st = await stateOut(req.user.id);
-    const since = Number(req.query.since || 0);
-    if (since && st.updatedAt && st.updatedAt <= since) return res.json({ unchanged: true, updatedAt: st.updatedAt });
     res.json(st);
+  }));
+  app.put('/api/state', auth, (req, res) => fail(res, 426, 'This copy of OLC is out of date. Close the app completely and open it again to update.', { code: 'update_required' }));
+
+  app.get('/api/sync', auth, wrap(async (req, res) => {
+    const r = await db.query(`SELECT data, version FROM states WHERE user_id=$1`, [req.user.id]);
+    if (!r.rows.length) return res.json({ state: null, v: 0, t: Date.now() });
+    const row = r.rows[0], v = Number(row.version);
+    if (Number(req.query.v || 0) === v) return res.json({ unchanged: true, v, t: Date.now() });
+    res.json({ state: safeParse(row.data), v, t: Date.now() });
   }));
 
   async function maybeBackup(userId, row, always) {
@@ -297,63 +326,78 @@ async function main() {
     for (const o of old.rows.slice(20)) await db.query(`DELETE FROM state_backups WHERE id=$1`, [o.id]);
   }
 
-  app.put('/api/state', auth, wrap(async (req, res) => {
-    const { state, baseUpdatedAt, force } = req.body || {};
+  app.post('/api/sync', auth, wrap(async (req, res) => {
+    const { state, device } = req.body || {};
     if (!state || typeof state !== 'object' || Array.isArray(state)) return fail(res, 400, 'Invalid data');
     const uid = req.user.id;
-    const cur = await db.query(`SELECT data, updated_at FROM states WHERE user_id=$1`, [uid]);
-    const text = JSON.stringify(state);
-    const base = Number(baseUpdatedAt || 0);
-
-    if (!cur.rows.length) {
-      const now = Date.now();
-      try {
-        await db.query(`INSERT INTO states (user_id, data, updated_at, version) VALUES ($1,$2,$3,1)`, [uid, text, now]);
-      } catch (e) {
-        const again = await stateOut(uid);
-        return fail(res, 409, 'Newer data exists on the server', { code: 'conflict', state: again.state, updatedAt: again.updatedAt });
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const cur = await db.query(`SELECT data, updated_at, version FROM states WHERE user_id=$1`, [uid]);
+      if (!cur.rows.length) {
+        const first = Merge.merge({}, state).state, now = Date.now();
+        try {
+          await db.query(`INSERT INTO states (user_id, data, updated_at, version) VALUES ($1,$2,$3,1)`, [uid, JSON.stringify(first), now]);
+        } catch (e) { continue; }                      // someone else created it first -> merge with theirs
+        broadcast(uid, { v: 1, from: device || '' }, device);
+        return res.json({ ok: true, v: 1, t: now });
       }
-      return res.json({ ok: true, updatedAt: now });
+      const row = cur.rows[0], curState = safeParse(row.data) || {};
+      // a device still running the old (v9) code would send data without field stamps: refuse so it cannot overwrite newer data
+      if (curState._m && !state._m && Object.keys(state).length) return fail(res, 426, 'This copy of OLC is out of date. Close the app completely and open it again to update.', { code: 'update_required' });
+      const r = Merge.merge(curState, state);
+      const rowV = Number(row.version);
+      if (!r.fromB) {                                   // nothing new from this device
+        return res.json({ ok: true, v: rowV, t: Date.now(), state: r.fromA ? r.state : undefined });
+      }
+      await maybeBackup(uid, row, false);
+      const stamp = Math.max(Date.now(), Number(row.updated_at) + 1);
+      const upd = await db.query(`UPDATE states SET data=$1, updated_at=$2, version=version+1 WHERE user_id=$3 AND version=$4`,
+        [JSON.stringify(r.state), stamp, uid, rowV]);
+      if (!upd.rowCount) continue;                      // another device wrote at the same moment -> re-merge
+      broadcast(uid, { v: rowV + 1, from: device || '' }, device);
+      return res.json({ ok: true, v: rowV + 1, t: Date.now(), state: r.fromA ? r.state : undefined });
     }
+    fail(res, 503, 'Server is busy — your data is safe on this device, it will retry');
+  }));
 
-    const row = cur.rows[0];
-    const serverStamp = Number(row.updated_at);
-    if (!force && base !== serverStamp) {
-      return fail(res, 409, 'Newer data exists on the server', { code: 'conflict', state: safeParse(row.data), updatedAt: serverStamp });
-    }
-    if (!force) {
-      const was = stateWeight(safeParse(row.data)), now = stateWeight(state);
-      if (was > 0 && now === 0) return fail(res, 409, 'Refusing to overwrite saved data with an empty state', { code: 'blank', state: safeParse(row.data), updatedAt: serverStamp });
-    }
-    await maybeBackup(uid, row, !!force);
-    const stamp = Math.max(Date.now(), serverStamp + 1);
-    const upd = await db.query(`UPDATE states SET data=$1, updated_at=$2, version=version+1 WHERE user_id=$3 AND updated_at=$4`,
-      [text, stamp, uid, serverStamp]);
-    if (!upd.rowCount && !force) {
-      const again = await stateOut(uid);
-      return fail(res, 409, 'Newer data exists on the server', { code: 'conflict', state: again.state, updatedAt: again.updatedAt });
-    }
-    if (!upd.rowCount) await db.query(`UPDATE states SET data=$1, updated_at=$2, version=version+1 WHERE user_id=$3`, [text, stamp, uid]);
-    res.json({ ok: true, updatedAt: stamp });
+  /* ---------- big files (images, PDFs) kept apart from the data so syncing stays fast ---------- */
+  const okId = (id) => /^[A-Za-z0-9_-]{6,80}$/.test(String(id || ''));
+  app.put('/api/blobs/:id', auth, express.raw({ type: () => true, limit: MAX_BLOB_BYTES }), wrap(async (req, res) => {
+    if (!okId(req.params.id)) return fail(res, 400, 'Bad file id');
+    const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (!buf.length) return fail(res, 400, 'Empty file');
+    const mime = String(req.query.m || 'application/octet-stream').slice(0, 80).replace(/[^A-Za-z0-9.+\-\/]/g, '');
+    const have = await db.query(`SELECT 1 FROM blobs WHERE user_id=$1 AND id=$2`, [req.user.id, req.params.id]);
+    if (have.rows.length) return res.json({ ok: true, existed: true });
+    const used = await db.query(`SELECT COALESCE(SUM(size),0) AS n FROM blobs WHERE user_id=$1`, [req.user.id]);
+    if (Number(used.rows[0].n) + buf.length > MAX_USER_BLOB_BYTES) return fail(res, 413, 'Cloud file storage is full', { code: 'quota' });
+    await db.query(`INSERT INTO blobs (user_id, id, mime, size, data, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id, id) DO NOTHING`,
+      [req.user.id, req.params.id, mime, buf.length, buf, Date.now()]);
+    res.json({ ok: true });
+  }));
+  app.get('/api/blobs/:id', auth, wrap(async (req, res) => {
+    if (!okId(req.params.id)) return fail(res, 400, 'Bad file id');
+    const r = await db.query(`SELECT mime, data FROM blobs WHERE user_id=$1 AND id=$2`, [req.user.id, req.params.id]);
+    if (!r.rows.length) return fail(res, 404, 'File not found');
+    res.set({ 'Content-Type': r.rows[0].mime, 'Cache-Control': 'private, max-age=31536000, immutable' });
+    res.send(Buffer.from(r.rows[0].data));
+  }));
+  app.post('/api/blobs/have', auth, wrap(async (req, res) => {
+    const ids = ((req.body || {}).ids || []).filter(okId).slice(0, 200);
+    if (!ids.length) return res.json({ have: [] });
+    const ph = ids.map((_, i) => '$' + (i + 2)).join(',');
+    const r = await db.query(`SELECT id FROM blobs WHERE user_id=$1 AND id IN (${ph})`, [req.user.id, ...ids]);
+    res.json({ have: r.rows.map((x) => x.id) });
   }));
 
   app.get('/api/backups', auth, wrap(async (req, res) => {
     const r = await db.query(`SELECT id, state_updated_at, created_at, data FROM state_backups WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20`, [req.user.id]);
     res.json({ backups: r.rows.map(b => ({ id: b.id, stateUpdatedAt: Number(b.state_updated_at), createdAt: Number(b.created_at), bytes: b.data.length })) });
   }));
+  // Restoring is done by the app: it loads this copy as a NEW edit (stamped "now") so every device follows it.
   app.post('/api/backups/:id/restore', auth, wrap(async (req, res) => {
     const b = await db.query(`SELECT data FROM state_backups WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
     if (!b.rows.length) return fail(res, 404, 'Backup not found');
-    const cur = await db.query(`SELECT data, updated_at FROM states WHERE user_id=$1`, [req.user.id]);
-    const stamp = Math.max(Date.now(), cur.rows.length ? Number(cur.rows[0].updated_at) + 1 : 0);
-    if (cur.rows.length) {
-      await db.query(`INSERT INTO state_backups (id, user_id, data, state_updated_at, created_at) VALUES ($1,$2,$3,$4,$5)`,
-        [rid('b'), req.user.id, cur.rows[0].data, cur.rows[0].updated_at, Date.now()]);
-      await db.query(`UPDATE states SET data=$1, updated_at=$2, version=version+1 WHERE user_id=$3`, [b.rows[0].data, stamp, req.user.id]);
-    } else {
-      await db.query(`INSERT INTO states (user_id, data, updated_at, version) VALUES ($1,$2,$3,1)`, [req.user.id, b.rows[0].data, stamp]);
-    }
-    res.json({ ok: true, state: safeParse(b.rows[0].data), updatedAt: stamp });
+    res.json({ ok: true, state: safeParse(b.rows[0].data) });
   }));
 
   /* ---------- legacy (old Codename + Code ID) ---------- */

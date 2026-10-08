@@ -41,32 +41,84 @@ const { main } = require('../server');
   const l = await call('POST', '/api/login', { username: 'abcdefg1@OLC.com', password: 'secret-One', device: 'Phone' });
   assert.equal(l.status, 200); const tokA2 = l.body.token; ok('login (case-insensitive username, 2nd device)');
 
-  // state: create, conflict, blank guard, backup
-  const big = { xp: 120, dailyLogs: { '2026-10-01': { waterL: 2 } }, trackerLogs: { weight: [{ date: '2026-10-01', v: 50 }] }, profile: { name: 'SK' } };
-  r = await call('PUT', '/api/state', { state: big, baseUpdatedAt: 0 }, a.body.token); assert.equal(r.status, 200);
-  let stamp = r.body.updatedAt; ok('first state save');
-  r = await call('GET', '/api/state', null, tokA2); assert.equal(r.body.state.xp, 120); ok('2nd device sees data');
-  r = await call('GET', '/api/state?since=' + stamp, null, tokA2); assert.equal(r.body.unchanged, true); ok('unchanged shortcut');
-  r = await call('PUT', '/api/state', { state: { ...big, xp: 150 }, baseUpdatedAt: stamp }, tokA2); assert.equal(r.status, 200); const stamp2 = r.body.updatedAt;
-  r = await call('PUT', '/api/state', { state: { ...big, xp: 999 }, baseUpdatedAt: stamp }, a.body.token);
-  assert.equal(r.status, 409); assert.equal(r.body.code, 'conflict'); assert.equal(r.body.state.xp, 150); ok('stale write rejected with server copy');
-  r = await call('PUT', '/api/state', { state: { xp: 0, dailyLogs: {}, trackerLogs: {} }, baseUpdatedAt: stamp2 }, a.body.token);
-  assert.equal(r.status, 409); assert.equal(r.body.code, 'blank'); ok('blank state cannot erase data');
-  r = await call('GET', '/api/state', null, a.body.token); assert.equal(r.body.state.xp, 150); ok('data intact');
-  r = await call('GET', '/api/backups', null, a.body.token); assert.ok(r.body.backups.length >= 1); const bk = r.body.backups[0].id; ok('server backup exists');
-  r = await call('POST', '/api/backups/' + bk + '/restore', null, a.body.token); assert.equal(r.body.state.xp, 120); ok('restore backup');
+  // ---- sync: field-by-field merge (the heart of v10) ----
+  const M = require('../merge');
+  const dev = (name, st) => { const o = { name, s: st ? JSON.parse(JSON.stringify(st)) : {}, v: 0 }; M.ensureMeta(o.s); o.snap = M.snapshot(o.s); return o; };
+  let clock = Date.now();
+  const edit = (d, fn) => { fn(d.s); const r = M.stamp(d.s, d.snap, ++clock); d.snap = r.snap; };
+  const push = async (d, tok) => { const r = await call('POST', '/api/sync', { state: d.s, device: d.name }, tok); assert.equal(r.status, 200, JSON.stringify(r.body)); if (r.body.state) { d.s = M.merge(d.s, r.body.state).state; d.snap = M.snapshot(d.s); } d.v = r.body.v; return r.body; };
+  const seed = { xpL: { m0: 120 }, dailyLogs: { '2026-10-01': { waterL: 2, items: {} } }, trackerLogs: { weight: [{ id: 'w1', date: '2026-10-01', kg: 50 }] }, profile: { name: 'SK' }, goals: [{ id: 'g1', label: 'Study', xp: 10 }] };
+  const laptop = dev('laptop', seed), phone = dev('phone', seed);
+  await push(laptop, a.body.token); ok('first sync stores the data');
+  r = await call('GET', '/api/state', null, tokA2); assert.equal(r.body.state.xp, 120); ok('legacy read still works');
+  r = await call('PUT', '/api/state', { state: base, baseUpdatedAt: 0 }, tokA2); assert.equal(r.status, 426); ok('old v9 app cannot overwrite (asked to update)');
+  r = await call('POST', '/api/sync', { state: { profile: { name: 'old' } } }, tokA2); assert.equal(r.status, 426); ok('state without field stamps refused once stamped data exists');
+  await push(phone, tokA2); ok('phone joins');
+  edit(laptop, (s) => { s.dailyLogs['2026-10-01'].items.g1 = 'full'; s.dailyLogs['2026-10-01'].ratings = { study: 4 }; s.profile.name = 'Agent SK'; });
+  await push(laptop, a.body.token);
+  edit(phone, (s) => { s.dailyLogs['2026-10-01'].waterL = 3.5; s.trackerLogs.weight.push({ id: 'w2', date: '2026-10-02', kg: 51 }); s.xpL['d_phone'] = 15; });   // phone edits WITHOUT seeing the laptop's edit first
+  const pr = await push(phone, tokA2);
+  assert.ok(pr.state, 'phone is sent what the laptop did');
+  assert.equal(phone.s.dailyLogs['2026-10-01'].items.g1, 'full'); assert.equal(phone.s.dailyLogs['2026-10-01'].waterL, 3.5); assert.equal(phone.s.profile.name, 'Agent SK');
+  ok('laptop edit + phone edit BOTH survive (no vanishing)');
+  edit(laptop, (s) => { s.xpL['d_laptop'] = 40; });
+  await push(laptop, a.body.token);
+  assert.equal(laptop.s.dailyLogs['2026-10-01'].waterL, 3.5); assert.equal(laptop.s.trackerLogs.weight.length, 2); assert.equal(laptop.s.xp, 175); ok('laptop receives the phone input; XP from both devices adds up (120+15+40)');
+  // a fresh blank default day created later on the phone must NOT erase laptop's real values
+  edit(phone, (s) => { s.dailyLogs['2026-10-05'] = { items: {}, waterL: 0, ratings: { study: 0 } }; });
+  edit(laptop, (s) => { s.dailyLogs['2026-10-05'] = { items: { g1: 'full' }, waterL: 1, ratings: { study: 3 } }; });
+  await push(laptop, a.body.token); await push(phone, tokA2);
+  assert.equal(phone.s.dailyLogs['2026-10-05'].waterL, 1); assert.equal(phone.s.dailyLogs['2026-10-05'].ratings.study, 3); ok('empty auto-created day never erases real data');
+  // latest edit wins on the same field
+  edit(laptop, (s) => { s.profile.name = 'Laptop name'; }); edit(phone, (s) => { s.profile.name = 'Phone name (later)'; });
+  await push(laptop, a.body.token); await push(phone, tokA2); await push(laptop, a.body.token);
+  assert.equal(laptop.s.profile.name, 'Phone name (later)'); assert.equal(phone.s.profile.name, 'Phone name (later)'); ok('same field: the LATEST edit from any device wins');
+  // deletion travels
+  edit(phone, (s) => { s.trackerLogs.weight = s.trackerLogs.weight.filter((w) => w.id !== 'w1'); });
+  await push(phone, tokA2); await push(laptop, a.body.token);
+  assert.deepEqual(laptop.s.trackerLogs.weight.map((w) => w.id), ['w2']); ok('deleting on one device deletes on the other');
+  r = await call('GET', '/api/sync?v=' + laptop.v, null, a.body.token); assert.equal(r.body.unchanged, true); ok('unchanged shortcut');
+  r = await call('GET', '/api/sync?v=0', null, a.body.token); assert.ok(r.body.state && r.body.v > 3); ok('full pull');
+  r = await call('GET', '/api/backups', null, a.body.token); ok('backups listing works (' + r.body.backups.length + ')');
 
-  r = await call('PUT', '/api/state', { state: { xp: 0, dailyLogs: { '2026-10-01': { items: {}, ratings: { study: 0 }, wokeOnTime: false, waterL: 0, screen: { totalMin: 0, devices: [] }, planner: { morning: '' }, eod: { well: '' } } }, trackerLogs: { weight: [] } }, baseUpdatedAt: (await call('GET', '/api/state', null, a.body.token)).body.updatedAt }, a.body.token);
-  assert.equal(r.status, 409); assert.equal(r.body.code, 'blank'); ok('blank state with an empty auto-created day cannot erase data');
+  // ---- concurrent pushes from two devices at the same instant: nothing lost ----
+  const d1 = dev('d1', laptop.s), d2 = dev('d2', laptop.s);
+  edit(d1, (s) => { s.profile.codename = 'ONE'; s.goals.push({ id: 'g_d1', label: 'From d1', xp: 5 }); });
+  edit(d2, (s) => { s.profile.age = '15'; s.goals.push({ id: 'g_d2', label: 'From d2', xp: 5 }); });
+  await Promise.all([push(d1, a.body.token), push(d2, tokA2)]);
+  await push(d1, a.body.token); await push(d2, tokA2);
+  for (const d of [d1, d2]) { assert.equal(d.s.profile.codename, 'ONE'); assert.equal(d.s.profile.age, '15'); assert.deepEqual(d.s.goals.map((g) => g.id).sort(), ['g1', 'g_d1', 'g_d2']); }
+  ok('two devices pushing at the same moment: both edits kept');
+
+  // ---- live updates (server-sent events) ----
+  const ac = new AbortController();
+  const ev = await fetch(base + '/api/events?device=watcher', { headers: { Authorization: 'Bearer ' + tokA2 }, signal: ac.signal });
+  assert.equal(ev.status, 200);
+  const reader = ev.body.getReader(); let got = '';
+  const readSome = (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; got += Buffer.from(value).toString(); if (got.includes('"v":')) return; } })();
+  await new Promise((r2) => setTimeout(r2, 150));
+  edit(d1, (s) => { s.profile.cls = 'Ten'; }); await push(d1, a.body.token);
+  await Promise.race([readSome, new Promise((_, rej) => setTimeout(() => rej(new Error('no live event')), 3000))]);
+  assert.match(got, /"v":\d+/); ac.abort(); ok('live update pushed to the other device');
+
+  // ---- file storage (images / PDFs) ----
+  const bytes = Buffer.from('%PDF-1.4 hello olc ' + 'x'.repeat(3000));
+  let pr2 = await fetch(base + '/api/blobs/b_test_pdf_001?m=application/pdf', { method: 'PUT', headers: { Authorization: 'Bearer ' + a.body.token, 'Content-Type': 'application/octet-stream' }, body: bytes });
+  assert.equal(pr2.status, 200); ok('file upload');
+  pr2 = await fetch(base + '/api/blobs/b_test_pdf_001', { headers: { Authorization: 'Bearer ' + tokA2 } });
+  assert.equal(pr2.status, 200); assert.equal(pr2.headers.get('content-type'), 'application/pdf'); assert.equal(Buffer.from(await pr2.arrayBuffer()).toString().slice(0, 8), '%PDF-1.4'); ok('file download on another device');
+  r = await call('POST', '/api/blobs/have', { ids: ['b_test_pdf_001', 'b_missing_0001'] }, a.body.token); assert.deepEqual(r.body.have, ['b_test_pdf_001']); ok('which files does the cloud already have');
+  pr2 = await fetch(base + '/api/blobs/b_test_pdf_001', { headers: {} }); assert.equal(pr2.status, 401); ok('files need sign-in');
 
   // isolation
-  r = await call('GET', '/api/state', null, b.token); assert.equal(r.body.state, null); ok('accounts isolated');
+  r = await call('GET', '/api/sync?v=0', null, b.token); assert.equal(r.body.state, null); ok('accounts isolated');
+  r = await fetch(base + '/api/blobs/b_test_pdf_001', { headers: { Authorization: 'Bearer ' + b.token } }); assert.equal(r.status, 404); ok('files isolated per account');
 
   // recovery
   r = await call('POST', '/api/recover', { username: 'Abcdefg1', recoveryCode: 'AAAA-BBBB-CCCC', newPassword: 'brand-new-1' }); assert.equal(r.status, 401);
   r = await call('POST', '/api/recover', { username: 'Abcdefg1', recoveryCode: a.body.recoveryCode.toLowerCase(), newPassword: 'secret-One1' }); assert.equal(r.status, 409); ok('recovery cannot reuse another account password');
   r = await call('POST', '/api/recover', { username: 'Abcdefg1', recoveryCode: a.body.recoveryCode.toLowerCase(), newPassword: 'brand-new-1' });
-  assert.equal(r.status, 200); assert.notEqual(r.body.recoveryCode, a.body.recoveryCode); assert.equal(r.body.state.xp, 120); ok('recover: new password, new code, data kept');
+  assert.equal(r.status, 200); assert.notEqual(r.body.recoveryCode, a.body.recoveryCode); assert.equal(r.body.state.xp, 175); ok('recover: new password, new code, data kept');
   assert.equal((await call('POST', '/api/login', { username: 'Abcdefg1', password: 'secret-One' })).status, 401);
   assert.equal((await call('POST', '/api/login', { username: 'Abcdefg1', password: 'brand-new-1' })).status, 200); ok('old password dead, new works');
   assert.equal((await call('GET', '/api/state', null, tokA2)).status, 401); ok('recovery signs out old sessions');

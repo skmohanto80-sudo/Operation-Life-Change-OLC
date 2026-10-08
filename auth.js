@@ -1,11 +1,11 @@
 /* ============================================================
-   OLC — ACCOUNTS • APP LOCK • SAFE SYNC  (v9)
+   OLC — ACCOUNTS • APP LOCK • SAFE SYNC  (v10)
    Replaces the old "opening login". The app now always opens
    instantly from this device's saved data; the cloud is only
    used in the background.
    ============================================================ */
-const APP_VERSION = '9.0';
-const API_BASE_URL = 'https://operation-life-change-olc-3.onrender.com/'.replace(/\/+$/, '');
+const APP_VERSION = '10.0';
+const API_BASE_URL = 'https://operation-life-change-olc.onrender.com'.replace(/\/+$/, '');
 const SUFFIX = '@olc.com';
 
 /* ---------- tiny helpers ---------- */
@@ -36,7 +36,6 @@ function deviceName(){
    Old data keys (olc_accounts / olc_state_*) are NEVER deleted by this app. */
 const ACC_KEY = 'olc2_accounts', ACTIVE_KEY = 'olc2_active';
 let activeAccountId = null;
-let meta = { updatedAt: 0, serverUpdatedAt: 0, dirty: false };
 function getAccounts(){ const a = LS.get(ACC_KEY, []); return Array.isArray(a) ? a : []; }
 function saveAccounts(list){ if(!LS.set(ACC_KEY, list)) toast('⚠ Device storage is full — export a backup and free some space.', 6000); }
 function loggedAccount(){ return getAccounts().find(a => a.id === activeAccountId) || null; }
@@ -54,13 +53,30 @@ function deepFill(target, defaults){
   }
   return target;
 }
+function hash32(str){ let h = 2166136261; for(let i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0); }
+/* tracker entries need an id so two devices can add entries at the same time without one replacing the other.
+   Old entries (no id) get an id made from their own content, so every device gives the same entry the same id. */
+function ensureEntryIds(st, deterministic){
+  const T = st.trackerLogs; if(!isPlain(T)) return;
+  for(const k of Object.keys(T)){
+    const arr = T[k]; if(!Array.isArray(arr)) continue;
+    const seen = {};
+    arr.forEach(e => {
+      if(!isPlain(e) || (typeof e.id === 'string' && e.id)) return;
+      if(deterministic){ const h = hash32(k + '|' + JSON.stringify(Object.keys(e).sort().map(x => [x, e[x]]))).toString(36); seen[h] = (seen[h] || 0) + 1; e.id = 't' + h + (seen[h] > 1 ? '_' + seen[h] : ''); }
+      else e.id = uid('t');
+    });
+  }
+}
 function hydrateState(obj){
   const st = isPlain(obj) ? obj : {};
+  if(!isPlain(st.xpL)) st.xpL = { m0: Number(st.xp) || 0 };    // data from before the XP ledger: its xp becomes the starting value
   deepFill(st, DEFAULT_STATE);
+  OLCMerge.derive(st);
   if(!st.streaks.screen) st.streaks.screen = { count:0, lastDate:null, _pc:0, _pd:null };
-  if(!Array.isArray(st.customMedals)) st.customMedals = [];
-  if(!Array.isArray(st.customBadges)) st.customBadges = [];
-  if(!Array.isArray(st.achievements)) st.achievements = [];
+  ['customMedals','customBadges','achievements','divisions','books'].forEach(k => { if(!Array.isArray(st[k])) st[k] = []; });
+  if(!isPlain(st.journal)) st.journal = clone(DEFAULT_STATE.journal);
+  if(!Array.isArray(st.journal.pages)) st.journal.pages = [];
   if(!Array.isArray(st.ruleBookNotes)){
     st.ruleBookNotes = [];
     if(st.ruleBookCustom && String(st.ruleBookCustom).trim())
@@ -80,7 +96,10 @@ function hydrateState(obj){
   }
   if(!isPlain(st.trackerLogs)) st.trackerLogs = {};
   ['weight','height','exercise','study','sleep'].forEach(k => { if(!Array.isArray(st.trackerLogs[k])) st.trackerLogs[k] = []; });
+  ensureEntryIds(st, true);
   if(!Array.isArray(st.goals)) st.goals = clone(DEFAULT_STATE.goals);
+  if(typeof v10Migrate === 'function') v10Migrate(st);
+  OLCMerge.ensureMeta(st);
   return st;
 }
 function dayHasData(d){
@@ -99,7 +118,8 @@ function stateWeight(s){
   if(typeof s.xp === 'number' && s.xp !== 0) w++;
   if(s.dailyLogs) for(const k of Object.keys(s.dailyLogs)) if(dayHasData(s.dailyLogs[k])) w++;
   if(s.trackerLogs) for(const k of Object.keys(s.trackerLogs)) w += (s.trackerLogs[k] || []).length;
-  ['customMedals','customBadges','achievements'].forEach(k => { if(Array.isArray(s[k])) w += s[k].length; });
+  ['customMedals','customBadges','achievements','divisions','books'].forEach(k => { if(Array.isArray(s[k])) w += s[k].filter(x => !(x && x.builtin)).length; });
+  if(s.journal && Array.isArray(s.journal.pages)) w += s.journal.pages.length;
   if(s.profile && (s.profile.name || s.profile.photo)) w++;
   return w;
 }
@@ -120,30 +140,72 @@ function stashBackup(label, st){
   }catch(e){}
 }
 
+/* ============================================================
+   THIS DEVICE: identity, clock, and the stamping of every change
+   ============================================================ */
+let deviceId = LS.get('olc2_device', null);
+if(!deviceId){ deviceId = 'd' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4); LS.set('olc2_device', deviceId); }
+let clockOffset = Number(LS.get('olc2_clockoff', 0)) || 0;     // how far this device's clock is from the server's
+let hlc = 0;
+function nowStamp(){ hlc = Math.max(Date.now() + clockOffset, hlc + 1); return hlc; }
+function noteClock(r, t0){
+  try{
+    const t = r && r.data && r.data.t; if(!t) return;
+    const rtt = Date.now() - t0; if(rtt > 6000) return;
+    const off = t - (t0 + rtt / 2);
+    clockOffset = Math.abs(off) < 2500 ? 0 : Math.round(off);
+    LS.set('olc2_clockoff', clockOffset);
+  }catch(e){}
+}
+let meta = { v: 0, dirty: false, seq: 0, fresh: false };
+let prevSnap = null;
+/* make `st` the live state of this device */
+function useState(st, m){
+  state = st; OLCMerge.ensureMeta(state);
+  meta = Object.assign({ v: 0, dirty: false, seq: 0, fresh: false }, m || {});
+  prevSnap = OLCMerge.snapshot(state);
+  hlc = Math.max(hlc, OLCMerge.maxStampOf(state));
+}
+/* turn the edits made since the last stamp into "changed now" marks (this is what lets every device merge correctly) */
+function commitLocal(){
+  if(!state) return 0;
+  ensureEntryIds(state, false);
+  if(!prevSnap) prevSnap = OLCMerge.snapshot(state);
+  const r = OLCMerge.stamp(state, prevSnap, nowStamp());
+  prevSnap = r.snap;
+  OLCMerge.derive(state);
+  return r.changed;
+}
+
 /* ---------- local persistence + save pipeline ---------- */
 let localTimer = null, pushTimer = null;
 function persistLocal(){
   if(!activeAccountId || !state) return;
+  commitLocal();
   const ok = LS.set(stateKey(activeAccountId), state);
   LS.set(metaKey(activeAccountId), meta);
   if(!ok) toast('⚠ Could not save on this device (storage full). Export a backup now.', 7000);
 }
 function saveState(){
   if(!activeAccountId || !state) return;
-  meta.updatedAt = Date.now(); meta.dirty = true;
-  clearTimeout(localTimer); localTimer = setTimeout(persistLocal, 250);
-  schedulePush(3000);
+  meta.dirty = true; meta.seq++;
+  clearTimeout(localTimer); localTimer = setTimeout(persistLocal, 350);
+  schedulePush(1200);
   setSync(navigator.onLine === false ? 'offline' : 'pending');
 }
 function loadLocalFor(id){
   const raw = LS.get(stateKey(id), null);
   const m = LS.get(metaKey(id), null);
-  meta = Object.assign({ updatedAt: 0, serverUpdatedAt: 0, dirty: false }, m || {});
+  meta = Object.assign({ v: 0, dirty: false, seq: 0, fresh: false }, m || {});
   return raw ? hydrateState(raw) : null;
 }
 
 /* ============================================================
    API + SYNC ENGINE
+   - every change is stamped; the server and every device MERGE field by field (merge.js)
+   - so a change made on the laptop and another made on the phone BOTH survive, and when two devices
+     change the very same field, the latest change (from any device) wins
+   - live push from the server: other devices hear about a change within a second or two
    ============================================================ */
 let syncInfo = { status: 'idle', at: null, msg: '' };
 function setSync(status, msg){
@@ -174,10 +236,8 @@ async function api(method, path, body, token, opts){
       headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
       body: body ? JSON.stringify(body) : undefined,
     });
-    const raw = await res.text().catch(() => '');
-    let data = {}; try{ data = JSON.parse(raw); }catch(e){ data = {}; }
-    if(!isPlain(data)) data = {};
-    return { ok: res.ok, status: res.status, data, raw: raw.slice(0, 200) };
+    let data = {}; try{ data = await res.json(); }catch(e){}
+    return { ok: res.ok, status: res.status, data };
   } finally { clearTimeout(t); }
 }
 /* sign-in style calls: tolerate a sleeping free-tier server, tell the user what's happening */
@@ -195,92 +255,92 @@ async function authCall(path, body, setMsg){
 }
 function wakeServer(){ try{ fetch(API_BASE_URL + '/api/health', { cache: 'no-store' }).catch(()=>{}); }catch(e){} }
 
-let pushing = false, pushAgain = false, backoff = 0;
-function schedulePush(ms){ clearTimeout(pushTimer); pushTimer = setTimeout(() => pushState(), ms); }
-async function pushState(force){
+let syncing = false, syncAgain = false, backoff = 0, lastSyncOk = 0, pendingRender = false, refreshTimer = null;
+function schedulePush(ms){ clearTimeout(pushTimer); pushTimer = setTimeout(() => syncNow(), ms); }
+function retryLater(){ backoff = Math.min(backoff ? backoff * 2 : 4000, 90000); schedulePush(backoff); }
+const isTyping = () => { const a = document.activeElement; return !!(a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)); };
+const uiBusy = () => isTyping() || (window.OLC_BUSY || []).some(f => { try{ return f(); }catch(e){ return false; } });
+
+async function syncNow(opts){
+  opts = opts || {};
   const acc = loggedAccount();
   if(!acc || !acc.token || !state) return;
   if(acc.expired){ setSync('auth'); return; }
-  if(meta.fresh && !force){ pullState({ manual: true }); return; }   // blank placeholder: learn what the cloud has first
-  if(!meta.dirty && !force) return;
-  if(pushing){ pushAgain = true; return; }
   if(navigator.onLine === false){ setSync('offline'); return; }
-  pushing = true; setSync('syncing');
-  const id = acc.id, stamp = meta.updatedAt;
-  try{
-    persistLocal();
-    const r = await api('PUT', '/api/state', { state, baseUpdatedAt: meta.serverUpdatedAt || 0, force: !!force }, acc.token, { timeout: 45000 });
-    if(activeAccountId !== id){            // user switched accounts while this was uploading — record the result for that account
-      if(r.ok){ const m = LS.get(metaKey(id), null); if(m){ m.serverUpdatedAt = r.data.updatedAt; if(m.updatedAt === stamp) m.dirty = false; LS.set(metaKey(id), m); } }
-      return;
-    }
-    if(r.ok){
-      meta.serverUpdatedAt = r.data.updatedAt;
-      if(meta.updatedAt === stamp) meta.dirty = false;
-      LS.set(metaKey(id), meta); backoff = 0;
-      setSync(meta.dirty ? 'pending' : 'ok');
-      if(meta.dirty) schedulePush(1500);
-    } else if(r.status === 409){ await handleConflict(r.data); }
-    else if(r.status === 401){ patchAccount(id, { expired: true }); setSync('auth'); }
-    else if(r.status === 413){ setSync('error', 'data too large'); toast('⚠ Your data is too large to sync — remove some big uploaded images.', 7000); }
-    else { setSync('error', r.data && r.data.error); retryLater(); }
-  }catch(e){ setSync(navigator.onLine === false ? 'offline' : 'error'); retryLater(); }
-  finally{ pushing = false; if(pushAgain){ pushAgain = false; schedulePush(1000); } }
-}
-function retryLater(){ backoff = Math.min(backoff ? backoff * 2 : 5000, 120000); schedulePush(backoff); }
-
-/* Both this device and the cloud changed. NOTHING is thrown away: the losing copy is saved as a backup. */
-async function handleConflict(d){
-  const serverState = d && d.state ? hydrateState(d.state) : null;
-  if(!serverState){ meta.serverUpdatedAt = (d && d.updatedAt) || 0; return pushState(true); }
-  const localNewer = !meta.fresh && meta.dirty && stateWeight(state) > 0 && meta.updatedAt > (d.updatedAt || 0) && d.code !== 'blank';
-  if(localNewer){
-    // keep this device's work; remember the cloud copy; overwrite (server backs up first too)
-    stashBackup('Cloud copy replaced by this device', serverState);
-    meta.serverUpdatedAt = d.updatedAt;
-    return pushState(true);
-  }
-  stashBackup('This device before loading newer cloud data', state);
-  adoptRemote(serverState, d.updatedAt);
-  toast('Loaded newer data from your other device. (Your previous copy is saved in Backups.)', 5000);
-}
-function adoptRemote(remoteState, updatedAt){
-  state = hydrateState(remoteState);
-  meta = { updatedAt: Date.now(), serverUpdatedAt: updatedAt || 0, dirty: false, fresh: false };
-  persistLocal(); setSync('ok');
-  if(document.body.classList.contains('app-on')){ applyStateToUI(); renderAll(); }
-}
-const isTyping = () => { const a = document.activeElement; return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); };
-let lastPull = 0;
-async function pullState(opts){
-  opts = opts || {};
-  const acc = loggedAccount();
-  if(!acc || !acc.token || acc.expired) return;
-  if(!opts.manual && (isTyping() || Date.now() - lastPull < 8000)) return;
-  if(navigator.onLine === false){ setSync('offline'); return; }
-  lastPull = Date.now();
+  if(syncing){ syncAgain = true; return; }
+  syncing = true;
+  if(meta.dirty || opts.manual) setSync('syncing');
   const id = acc.id;
   try{
-    if(!pushing) setSync('syncing');
-    const r = await api('GET', '/api/state?since=' + (meta.serverUpdatedAt || 0), null, acc.token, { timeout: 30000 });
+    persistLocal();                                             // stamps edits that are not stamped yet
+    if(typeof Blobs !== 'undefined') await Blobs.uploadPending(acc).catch(() => {});   // files first, so other devices can open them
     if(activeAccountId !== id) return;
+    const seq = meta.seq, t0 = Date.now();
+    let r, posted = false;
+    if(meta.fresh && !opts.force) r = await api('GET', '/api/sync?v=0', null, acc.token, { timeout: 45000 });
+    else if(meta.dirty || opts.force || !meta.v){ posted = true; r = await api('POST', '/api/sync', { state, device: deviceId }, acc.token, { timeout: 70000 }); }
+    else r = await api('GET', '/api/sync?v=' + meta.v, null, acc.token, { timeout: 30000 });
+    if(activeAccountId !== id) return;
+    noteClock(r, t0);
     if(r.status === 401){ patchAccount(id, { expired: true }); setSync('auth'); return; }
-    if(!r.ok){ setSync('error', r.data && r.data.error); return; }
-    if(r.data.unchanged){ setSync(meta.dirty ? 'pending' : 'ok'); if(meta.dirty) schedulePush(500); return; }
-    if(!r.data.state){            // cloud empty: upload what we have
-      const wasFresh = meta.fresh; meta.fresh = false;
-      if(stateWeight(state) > 0 || (meta.dirty && !wasFresh)){ meta.dirty = true; meta.serverUpdatedAt = 0; return pushState(); }
-      persistLocal(); return setSync('ok');
-    }
-    if(meta.fresh){ stashBackup('Blank placeholder', state); adoptRemote(r.data.state, r.data.updatedAt); return; }
-    if(meta.dirty) await handleConflict({ state: r.data.state, updatedAt: r.data.updatedAt, code: 'conflict' });
-    else adoptRemote(r.data.state, r.data.updatedAt);
-  }catch(e){ setSync(navigator.onLine === false ? 'offline' : 'error'); }
+    if(r.status === 426){ setSync('error', 'update needed'); toast('A newer version of OLC is ready — close the app completely and open it again.', 9000); return; }
+    if(r.status === 413){ setSync('error', 'data too large'); toast('⚠ Your data is too large to sync — remove some big uploaded images.', 7000); return; }
+    if(!r.ok){ setSync('error', r.data && r.data.error); retryLater(); return; }
+    backoff = 0;
+    const d = r.data;
+    if(meta.fresh){
+      if(d.state){ applyRemote(d.state, { replace: true }); meta.fresh = false; }
+      else { meta.fresh = false; meta.dirty = true; meta.seq++; }          // cloud is empty: this device's data becomes the first copy
+    } else if(d.state){ applyRemote(d.state); }
+    if(typeof d.v === 'number') meta.v = d.v;
+    if(posted && meta.seq === seq) meta.dirty = false;
+    lastSyncOk = Date.now();
+    LS.set(metaKey(id), meta);
+    setSync(meta.dirty ? 'pending' : 'ok');
+    if(meta.dirty) schedulePush(600);
+  }catch(e){ setSync(navigator.onLine === false ? 'offline' : 'error'); retryLater(); }
+  finally{ syncing = false; if(syncAgain){ syncAgain = false; schedulePush(250); } }
+}
+/* combine the cloud copy with this device's copy — field by field */
+function applyRemote(remote, opts){
+  opts = opts || {};
+  commitLocal();                                                // edits made while the request was travelling
+  let next, changed;
+  if(opts.replace){ next = hydrateState(clone(remote)); changed = true; }
+  else {
+    const r = OLCMerge.merge(state, remote);
+    hlc = Math.max(hlc, r.maxStamp);
+    next = hydrateState(r.state); changed = r.fromB;
+  }
+  if(!changed) return false;
+  const keep = { v: meta.v, dirty: meta.dirty, seq: meta.seq, fresh: false };
+  useState(next, keep);
+  LS.set(stateKey(activeAccountId), state); LS.set(metaKey(activeAccountId), meta);
+  refreshUI();
+  return true;
+}
+/* redraw the screen after data arrived from another device — but never while you are typing or have a form open */
+function refreshUI(){
+  if(!document.body.classList.contains('app-on') || locked) { pendingRender = true; return; }
+  try{ renderTopbar(); }catch(e){}
+  if(uiBusy()){ pendingRender = true; clearTimeout(refreshTimer); refreshTimer = setTimeout(() => { if(pendingRender) refreshUI(); }, 2500); return; }
+  pendingRender = false;
+  applyStateToUI(); renderAll();
+}
+/* use a copy (backup, imported file, old data) as the truth: recorded as a NEW edit, so every device follows it */
+function adoptSnapshot(st){
+  commitLocal();
+  const old = state, prev = OLCMerge.snapshot(old);
+  const next = hydrateState(clone(st));
+  next._m = clone(old._m || { s: {}, d: {} });
+  state = next; OLCMerge.ensureMeta(state);
+  const r = OLCMerge.stamp(state, prev, nowStamp()); prevSnap = r.snap;
+  meta.dirty = true; meta.seq++;
+  persistLocal(); schedulePush(300);
 }
 async function manualSyncNow(){
   toast('Syncing…', 1500);
-  await pullState({ manual: true });
-  await pushState();
+  await syncNow({ manual: true, force: true });
   toast(syncInfo.status === 'ok' ? '✓ Synced' : 'Could not sync right now — your data is safe on this device.', 3000);
 }
 function syncPillClick(){
@@ -288,17 +348,58 @@ function syncPillClick(){
   if(syncInfo.status === 'auth' && acc) return reauth(acc);
   manualSyncNow();
 }
+// compatibility names used elsewhere in the app
+const pushState = (force) => syncNow({ force: !!force });
+const pullState = (o) => syncNow({ manual: !!(o && o.manual) });
+
+/* ---- live updates: the server tells this device the moment another device saved something ---- */
+let liveUp = false, liveWanted = false, liveCtrl = null;
+async function liveLoop(){
+  let wait = 1500;
+  while(liveWanted){
+    const acc = loggedAccount();
+    if(!acc || !acc.token || acc.expired || document.hidden || navigator.onLine === false){ await new Promise(r => setTimeout(r, 4000)); continue; }
+    const ctrl = new AbortController(); liveCtrl = ctrl;
+    try{
+      const res = await fetch(API_BASE_URL + '/api/events?device=' + encodeURIComponent(deviceId), { headers: { Authorization: 'Bearer ' + acc.token }, signal: ctrl.signal });
+      if(!res.ok || !res.body) throw new Error('no stream');
+      liveUp = true; wait = 1500;
+      const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
+      for(;;){
+        const { value, done } = await reader.read(); if(done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while((i = buf.indexOf('\n\n')) >= 0){
+          const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+          const m = chunk.match(/^data: (.*)$/m);
+          if(m){ try{ const ev = JSON.parse(m[1]); if(ev && ev.v && ev.v !== meta.v) schedulePush(80); }catch(e){} }
+        }
+      }
+    }catch(e){ /* reconnect below */ }
+    liveUp = false;
+    await new Promise(r => setTimeout(r, wait)); wait = Math.min(wait * 2, 30000);
+  }
+}
+function startLive(){ if(liveWanted) return; liveWanted = true; liveLoop(); }
+function restartLive(){ try{ if(liveCtrl) liveCtrl.abort(); }catch(e){} }
+
 function startSyncLoops(){
   if(window.__syncLoops) return; window.__syncLoops = true;
-  setInterval(() => { if(!document.hidden && state && !locked){ pullState(); pushState(); } }, 90000);
-  window.addEventListener('online', () => { pullState({ manual: true }); pushState(); });
+  setInterval(() => {
+    if(document.hidden || !state || locked) return;
+    const idle = Date.now() - lastSyncOk;
+    if(meta.dirty || !liveUp || idle > 100000) syncNow();
+  }, 15000);
+  window.addEventListener('online', () => { restartLive(); syncNow({ manual: true }); });
   window.addEventListener('offline', () => setSync('offline'));
   document.addEventListener('visibilitychange', () => {
-    if(document.hidden){ hiddenAt = Date.now(); persistLocal(); pushState(); }
-    else { checkAutoLock(); if(!locked) pullState(); }
+    if(document.hidden){ hiddenAt = Date.now(); persistLocal(); if(meta.dirty) syncNow(); }
+    else { checkAutoLock(); restartLive(); if(!locked){ syncNow(); if(pendingRender) refreshUI(); } }
     document.documentElement.classList.toggle('anim-paused', document.hidden);
   });
-  window.addEventListener('pagehide', () => { persistLocal(); pushState(); });
+  window.addEventListener('pagehide', () => { persistLocal(); });
+  document.addEventListener('focusout', () => { if(pendingRender) setTimeout(() => { if(pendingRender) refreshUI(); }, 400); });
+  startLive();
 }
 
 /* ============================================================
@@ -455,7 +556,7 @@ function renderAuth(mode, opts){
       <div class="auth-links"><a onclick="renderAuth('signin')">← Back to sign in</a></div>
     </form>`;
   }
-  g.innerHTML = authShell(tabs + body + '<div id="authMsg" class="auth-msg"></div><div id="authError"></div><div class="auth-links" style="margin-top:8px;"><a onclick="checkServer()">Check server</a></div>');
+  g.innerHTML = authShell(tabs + body + '<div id="authMsg" class="auth-msg"></div><div id="authError"></div>');
   const first = g.querySelector('input[type=text]'); if(first && !opts.noFocus) setTimeout(() => { try{ first.focus(); }catch(e){} }, 60);
 }
 function useLegacy(i){
@@ -487,43 +588,6 @@ function addDeviceAccount(a){
   if(i >= 0) l[i] = Object.assign({}, l[i], a, { expired: false }); else l.push(Object.assign({ addedAt: Date.now() }, a));
   saveAccounts(l);
 }
-/* turn any server reply into a message a human can act on */
-function replyError(r, fallback){
-  if(r.data && r.data.error) return r.data.error;
-  const st = r.status;
-  if(st === 404 || st === 405) return 'The server at ' + API_BASE_URL + ' does not have the new OLC backend (HTTP ' + st + '). It is probably still the OLD version — redeploy the new backend folder on Render, then tap "Check server".';
-  if([502, 503, 504].includes(st)) return 'The server is not running properly (HTTP ' + st + '). On Render open the service → Logs: it usually means DATABASE_URL is missing or wrong. Tap "Check server" for details.';
-  return (fallback || 'Request failed') + ' (server replied HTTP ' + st + '). Tap "Check server" for details.';
-}
-async function checkServer(){
-  setAuthErr(''); setAuthMsg('Checking the server… (can take up to a minute if it was asleep)');
-  const t0 = performance.now();
-  try{
-    const r = await api('GET', '/api/health', null, null, { timeout: 70000 });
-    setAuthMsg('');
-    const ms = Math.round(performance.now() - t0);
-    if(r.ok && r.data && r.data.version){
-      const good = r.data.storage === 'postgres' && String(r.data.version).startsWith('2');
-      openModal(`<h3 style="justify-content:center;">SERVER CHECK</h3>
-        <div class="diag ${good ? 'ok' : 'bad'}">${good ? '✓' : '✗'} Server answered in ${ms} ms — backend v${esc(r.data.version)}, storage: ${esc(r.data.storage)}</div>
-        ${r.data.storage !== 'postgres' ? '<div class="diag bad">✗ Storage is not PostgreSQL. Data would be lost. Set DATABASE_URL on Render.</div>' : ''}
-        <div class="stat-label" style="margin-top:8px;">Address used: ${esc(API_BASE_URL)}</div>
-        <button class="btn" style="width:100%; margin-top:12px;" onclick="closeModal()">Close</button>`);
-    } else {
-      openModal(`<h3 style="justify-content:center;">SERVER CHECK</h3>
-        <div class="diag bad">✗ HTTP ${r.status} from ${esc(API_BASE_URL)}/api/health</div>
-        <div class="stat-label">${r.status === 404 ? 'The new backend is NOT running at this address (old version or wrong service).' : 'The server is up but not healthy — check the Render logs.'}</div>
-        <div class="stat-label mono" style="margin-top:8px; word-break:break-all;">${esc(r.raw || '(empty reply)')}</div>
-        <button class="btn" style="width:100%; margin-top:12px;" onclick="closeModal()">Close</button>`);
-    }
-  }catch(e){
-    setAuthMsg('');
-    openModal(`<h3 style="justify-content:center;">SERVER CHECK</h3>
-      <div class="diag bad">✗ Cannot reach ${esc(API_BASE_URL)}</div>
-      <div class="stat-label">${navigator.onLine ? 'Wrong address in API_BASE_URL (top of auth.js), or the Render service is stopped/failed to deploy.' : 'You are offline.'}</div>
-      <button class="btn" style="width:100%; margin-top:12px;" onclick="closeModal()">Close</button>`);
-  }
-}
 async function submitCreate(e){
   e.preventDefault();
   const u = normalizeUsername($('cr_user').value), p = $('cr_pass').value, p2 = $('cr_pass2').value;
@@ -535,14 +599,14 @@ async function submitCreate(e){
   try{ r = await authCall('/api/register', { username: u, password: p, avatar: createAvatar, device: deviceName() }, setAuthMsg); }
   catch(err){ setAuthBusy(false); setAuthMsg(''); return setAuthErr('Cannot reach the server. Check your internet and try again — nothing was lost.'); }
   setAuthBusy(false); setAuthMsg('');
-  if(!r.ok) return setAuthErr(replyError(r, 'Could not create the account'), r.data.field === 'password' ? 'cr_pass' : r.data.field === 'username' ? 'cr_user' : null);
+  if(!r.ok) return setAuthErr(r.data.error || 'Could not create the account.', r.data.field === 'password' ? 'cr_pass' : 'cr_user');
   const d = r.data;
   addDeviceAccount({ id: d.user.id, username: d.user.username, avatar: d.user.avatar, token: d.token });
   activeAccountId = d.user.id; LS.set(ACTIVE_KEY, d.user.id);
   let st;
   if(pendingImport){ st = hydrateState(clone(pendingImport.state)); if(!st.profile.photo && createAvatar) st.profile.photo = createAvatar; }
   else { st = hydrateState({}); st.profile.codename = u.split('@')[0]; if(createAvatar) st.profile.photo = createAvatar; }
-  state = st; meta = { updatedAt: Date.now(), serverUpdatedAt: 0, dirty: true }; persistLocal();
+  useState(st, { v: 0, dirty: true, seq: 1 }); persistLocal();
   offerSavePassword(u, p);
   markMigrated(pendingImport); pendingImport = null; createAvatar = null;
   $('authGate').innerHTML = '';               // remove the form so the browser offers to save the password
@@ -557,7 +621,7 @@ async function submitSignin(e){
   try{ r = await authCall('/api/login', { username: u, password: p, device: deviceName() }, setAuthMsg); }
   catch(err){ setAuthBusy(false); setAuthMsg(''); return setAuthErr('Cannot reach the server. Check your internet. (If you were already signed in on this device, close this and keep using the app — your data is safe.)'); }
   setAuthBusy(false); setAuthMsg('');
-  if(!r.ok) return setAuthErr(replyError(r, 'Could not sign in'), r.data.error ? 'si_pass' : null);
+  if(!r.ok) return setAuthErr(r.data.error || 'Could not sign in.', 'si_pass');
   offerSavePassword(r.data.user.username, p);
   completeSignIn(r.data);
   $('authGate').innerHTML = '';
@@ -573,27 +637,28 @@ async function submitForgot(e){
   try{ r = await authCall('/api/recover', { username: u, recoveryCode: code, newPassword: p, device: deviceName() }, setAuthMsg); }
   catch(err){ setAuthBusy(false); setAuthMsg(''); return setAuthErr('Cannot reach the server. Try again in a moment.'); }
   setAuthBusy(false); setAuthMsg('');
-  if(!r.ok) return setAuthErr(replyError(r, 'Recovery failed'), r.data.field === 'password' ? 'fr_pass' : r.data.error ? 'fr_code' : null);
+  if(!r.ok) return setAuthErr(r.data.error || 'Recovery failed.', r.data.field === 'password' ? 'fr_pass' : 'fr_code');
   offerSavePassword(r.data.user.username, p);
   completeSignIn(r.data);
   $('authGate').innerHTML = '';
   showRecoveryModal(r.data.recoveryCode, () => { closeAuth(); enterApp(); if(meta.dirty) pushState(); }, true);
 }
-/* decide between this device's copy and the cloud copy — the losing one is always kept as a backup */
+/* signing in: nothing is replaced — this device's copy and the cloud copy are merged field by field */
 function completeSignIn(d){
   const id = d.user.id;
   addDeviceAccount({ id, username: d.user.username, avatar: d.user.avatar, token: d.token });
   activeAccountId = id; LS.set(ACTIVE_KEY, id);
   const local = loadLocalFor(id);                    // also loads this device's sync info into `meta`
-  const serverState = d.state ? hydrateState(d.state) : null, sUpd = d.updatedAt || 0;
-  const localHasData = local && (stateWeight(local) > 0 || meta.dirty);
-  if(localHasData){
-    if(serverState && sUpd > (meta.serverUpdatedAt || 0)){
-      if(meta.dirty && meta.updatedAt > sUpd){ state = local; stashBackup('Cloud copy at sign-in', serverState); meta.serverUpdatedAt = sUpd; }
-      else { state = local; stashBackup('This device before sign-in', local); state = serverState; meta = { updatedAt: Date.now(), serverUpdatedAt: sUpd, dirty: false }; }
-    } else { state = local; if(!serverState){ meta.serverUpdatedAt = 0; meta.dirty = true; } }
-  } else if(serverState){ state = serverState; meta = { updatedAt: Date.now(), serverUpdatedAt: sUpd, dirty: false }; }
-  else { state = hydrateState({}); state.profile.codename = d.user.username.split('@')[0]; meta = { updatedAt: Date.now(), serverUpdatedAt: sUpd, dirty: false }; }
+  const serverState = d.state ? hydrateState(clone(d.state)) : null;
+  if(local && (stateWeight(local) > 0 || meta.dirty)){
+    useState(local, { v: 0, dirty: true, seq: (meta.seq || 0) + 1 });
+    if(serverState) applyRemote(serverState);
+  } else if(serverState){
+    useState(serverState, { v: d.v || 0, dirty: false });
+  } else {
+    const st = hydrateState({}); st.profile.codename = d.user.username.split('@')[0];
+    useState(st, { v: 0, dirty: true, seq: 1 });
+  }
   persistLocal();
 }
 function showRecoveryModal(code, done, isReset){
@@ -644,18 +709,20 @@ async function switchAccount(id){
   closeAcctMenu();
   if(id === activeAccountId) return;
   const acc = getAccounts().find(a => a.id === id); if(!acc) return;
-  persistLocal(); pushState();
+  persistLocal(); if(meta.dirty) syncNow();
   activeAccountId = id; LS.set(ACTIVE_KEY, id);
   let st = loadLocalFor(id);
-  if(!st){
+  if(st) useState(st, meta);
+  else {
     toast('Loading account…', 2500);
+    let got = false;
     if(acc.token && !acc.expired){
-      try{ const r = await api('GET', '/api/state', null, acc.token, { timeout: 30000 });
-        if(r.ok && r.data.state){ st = hydrateState(r.data.state); meta = { updatedAt: Date.now(), serverUpdatedAt: r.data.updatedAt, dirty: false }; } }catch(e){}
+      try{ const r = await api('GET', '/api/sync?v=0', null, acc.token, { timeout: 30000 });
+        if(r.ok && r.data.state){ useState(hydrateState(clone(r.data.state)), { v: r.data.v || 0, dirty: false }); got = true; } }catch(e){}
     }
-    if(!st){ st = hydrateState({}); st.profile.codename = acc.username.split('@')[0]; }
+    if(!got){ st = hydrateState({}); st.profile.codename = acc.username.split('@')[0]; useState(st, { v: 0, fresh: true }); }
   }
-  state = st; persistLocal();
+  persistLocal();
   applyStateToUI(); currentSection = 'home'; go('home'); renderAll();
   toast('Switched to ' + acc.username);
   setSync(acc.expired ? 'auth' : 'idle');
@@ -800,7 +867,7 @@ function unlock(){
   document.documentElement.classList.remove('locked', 'locked-boot');
   $('lockScreen').innerHTML = '';
   if(afterUnlock){ const f = afterUnlock; afterUnlock = null; f(); }
-  else { pullState(); }
+  else { syncNow(); if(pendingRender) refreshUI(); }
 }
 async function verifyAccountPassword(acc, pw){
   try{
@@ -928,7 +995,7 @@ async function loadBackups(){
 }
 function replaceStateWith(st, label){
   stashBackup('Before ' + label, state);
-  state = hydrateState(clone(st)); saveState(); applyStateToUI(); renderAll(); toast('✓ ' + label + ' restored', 4000);
+  adoptSnapshot(st); applyStateToUI(); renderAll(); toast('✓ ' + label + ' restored', 4000);
 }
 function restoreLocalBackup(i){
   const b = (LS.get(bkKey(activeAccountId), []) || [])[i]; if(!b) return;
@@ -940,7 +1007,7 @@ async function restoreServerBackup(id){
   try{
     stashBackup('Before cloud restore', state);
     const r = await api('POST', '/api/backups/' + encodeURIComponent(id) + '/restore', null, acc.token, { timeout: 40000 });
-    if(r.ok){ adoptRemote(r.data.state, r.data.updatedAt); toast('✓ Cloud copy restored', 4000); } else toast(r.data.error || 'Could not restore.');
+    if(r.ok && r.data.state){ replaceStateWith(r.data.state, 'cloud copy'); } else toast(r.data.error || 'Could not restore.');
   }catch(e){ toast('Could not reach the server.'); }
 }
 function importBackupFile(input){
@@ -1046,11 +1113,11 @@ window.addEventListener('error', (e) => {
    STARTUP — instant, local-first
    ============================================================ */
 function applyStateToUI(){
-  setTheme(state.settings.theme || 'dark');
-  const ct = state.settings.colorTheme;
-  if(ct && ct !== 'violet') document.documentElement.setAttribute('data-color', ct); else document.documentElement.removeAttribute('data-color');
-  applyMonkMode(state.settings.mode || 'normal');
+  setThemeQuiet(state.settings.theme || 'dark');
+  if(typeof applyDivisionTheme === 'function') applyDivisionTheme();
+  applyMonkMode();
   syncProfileImagesToDOM();
+  if(typeof applySidebarLayout === 'function') applySidebarLayout();
   document.querySelectorAll('.navbtn').forEach(b => b.classList.toggle('active', b.dataset.sec === currentSection));
 }
 let bootPlayed = false;
@@ -1059,7 +1126,9 @@ function enterApp(){
   rollover();
   applyStateToUI(); renderAll();
   const boot = $('boot'), app = $('app');
-  if(bootPlayed){ app.classList.add('ready'); }
+  const recent = Date.now() - (Number(LS.get('olc2_lastopen', 0)) || 0) < 20 * 60 * 1000;   // opened in the last 20 minutes: skip the intro, open at once
+  LS.set('olc2_lastopen', Date.now());
+  if(bootPlayed || recent){ bootPlayed = true; app.classList.add('ready'); }
   else {
     bootPlayed = true;
     boot.style.display = 'flex'; boot.style.opacity = '1';
@@ -1071,13 +1140,14 @@ function enterApp(){
       setTimeout(() => { boot.style.display = 'none'; }, 450);
     };
     boot.onclick = finish;                 // tap to skip
-    setTimeout(finish, 1300);
+    setTimeout(finish, 650);
   }
   startSyncLoops();
   setSync(syncInfo.status === 'idle' ? 'idle' : syncInfo.status);
   pullState({ manual: true });
+  (window.requestIdleCallback || ((f) => setTimeout(f, 1500)))(() => { try{ upgradeInlineImages(); }catch(e){} });
 }
-function repairData(){ stashBackup('Before repair', state); state = hydrateState(state); saveState(); renderAll(); toast('Repaired'); }
+function repairData(){ stashBackup('Before repair', state); state = hydrateState(state); prevSnap = OLCMerge.snapshot(state); saveState(); renderAll(); toast('Repaired'); }
 function boot(){
   tickClock(); setInterval(tickClock, 1000);
   setInterval(() => { if(state && !locked){ rollover(); renderTopbar(); } }, 30000);
@@ -1089,8 +1159,8 @@ function boot(){
   let id = LS.get(ACTIVE_KEY, null); if(!accs.find(a => a.id === id)) id = accs[0].id;
   activeAccountId = id; LS.set(ACTIVE_KEY, id);
   let st = loadLocalFor(id);
-  if(!st){ st = hydrateState({}); const a = accs.find(x => x.id === id); st.profile.codename = a.username.split('@')[0]; meta = { updatedAt: 0, serverUpdatedAt: 0, dirty: false, fresh: true }; }
-  state = st;
+  if(st) useState(st, meta);
+  else { st = hydrateState({}); const a = accs.find(x => x.id === id); st.profile.codename = a.username.split('@')[0]; useState(st, { v: 0, dirty: false, fresh: true }); }
   const go_ = () => { enterApp(); };
   if(lockCfg()){ afterUnlock = go_; locked = true; document.documentElement.classList.add('locked-boot'); renderLock(); }
   else go_();
