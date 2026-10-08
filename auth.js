@@ -5,7 +5,7 @@
    used in the background.
    ============================================================ */
 const APP_VERSION = '10.0';
-const API_BASE_URL = 'https://operation-life-change-olc.onrender.com'.replace(/\/+$/, '');
+const API_BASE_URL = 'https://operation-life-change-olc-3.onrender.com'.replace(/\/+$/, '');
 const SUFFIX = '@olc.com';
 
 /* ---------- tiny helpers ---------- */
