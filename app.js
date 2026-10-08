@@ -1060,18 +1060,6 @@ function secProfile(){
       <img src="${currentProfilePhoto()}" alt="Agent" onclick="openPhotoModal()" style="width:150px; height:150px; object-fit:cover; border-radius:50%; border:3px solid var(--border-strong); box-shadow:0 0 24px color-mix(in srgb, var(--lavender) 40%, transparent); cursor:pointer;">
       <div class="stat-label" style="margin-top:6px;">TAP PHOTO TO ENLARGE</div>
       ${profileDivisionHTML()}
-      ${(()=>{
-        const autoUnlocked = getMedals().filter(m=>m.unlocked);
-        const earnedCustom = (state.customMedals||[]).filter(m=>m.timesEarned>0);
-        if(!autoUnlocked.length && !earnedCustom.length) return '';
-        return `
-      <div style="margin-top:10px;">
-        <div class="eyebrow" style="margin-bottom:6px;">RIBBON BAR</div>
-        <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:2px; max-width:220px; margin:0 auto;">
-          ${autoUnlocked.map(m=>`<span title="${esc(m.name)}">${medalSVG(m.ribbon, true, true)}</span>`).join('')}
-          ${earnedCustom.map(m=>`<span title="${esc(m.name)} (×${m.timesEarned})">${ribbonGraphic(m)}</span>`).join('')}
-        </div>
-      </div>`; })()}
       <div style="margin-top:10px;">
         <label class="btn ghost sm" style="cursor:pointer;">Upload Profile Photo<input type="file" accept="image/*" style="display:none;" onchange="uploadProfilePhoto(this)"></label>
       </div>

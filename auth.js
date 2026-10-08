@@ -5,7 +5,8 @@
    used in the background.
    ============================================================ */
 const APP_VERSION = '10.0';
-const API_BASE_URL = 'https://operation-life-change-olc-2.onrender.com'.replace(/\/+$/, '');
+const API_URL_RAW = 'https://operation-life-change-olc.onrender.com';   // <- your backend address (Render/Railway)
+const API_BASE_URL = (/^https?:\/\//i.test(API_URL_RAW.trim()) ? API_URL_RAW.trim() : 'https://' + API_URL_RAW.trim()).replace(/\/+$/, '');
 const SUFFIX = '@olc.com';
 
 /* ---------- tiny helpers ---------- */
@@ -285,7 +286,8 @@ async function syncNow(opts){
     if(r.status === 401){ patchAccount(id, { expired: true }); setSync('auth'); return; }
     if(r.status === 426){ setSync('error', 'update needed'); toast('A newer version of OLC is ready — close the app completely and open it again.', 9000); return; }
     if(r.status === 413){ setSync('error', 'data too large'); toast('⚠ Your data is too large to sync — remove some big uploaded images.', 7000); return; }
-    if(!r.ok){ setSync('error', r.data && r.data.error); retryLater(); return; }
+    if(r.status === 404){ setSync('error', 'server is the OLD version'); toast('Sync: your backend on Render is still the old version (v9). Upload the v10 backend folder to GitHub and redeploy it, then reopen OLC.', 12000); retryLater(); return; }
+    if(!r.ok){ setSync('error', 'server answered ' + r.status + (r.data && r.data.error ? ': ' + r.data.error : '')); retryLater(); return; }
     backoff = 0;
     const d = r.data;
     if(meta.fresh){
@@ -298,7 +300,7 @@ async function syncNow(opts){
     LS.set(metaKey(id), meta);
     setSync(meta.dirty ? 'pending' : 'ok');
     if(meta.dirty) schedulePush(600);
-  }catch(e){ setSync(navigator.onLine === false ? 'offline' : 'error'); retryLater(); }
+  }catch(e){ setSync(navigator.onLine === false ? 'offline' : 'error', 'cannot reach ' + API_BASE_URL + ' (' + (e && e.name === 'AbortError' ? 'timed out — server may be waking up' : 'blocked or wrong address') + ')'); retryLater(); }
   finally{ syncing = false; if(syncAgain){ syncAgain = false; schedulePush(250); } }
 }
 /* combine the cloud copy with this device's copy — field by field */
@@ -346,6 +348,7 @@ async function manualSyncNow(){
 function syncPillClick(){
   const acc = loggedAccount();
   if(syncInfo.status === 'auth' && acc) return reauth(acc);
+  if(syncInfo.status === 'error' && syncInfo.msg) toast('Sync problem: ' + syncInfo.msg, 9000);
   manualSyncNow();
 }
 // compatibility names used elsewhere in the app
