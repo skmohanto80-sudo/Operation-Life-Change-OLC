@@ -5,7 +5,7 @@
    used in the background.
    ============================================================ */
 const APP_VERSION = '10.0';
-const API_URL_RAW = 'https://operation-life-change-olc-3.onrender.com';   // <- your backend address (Render/Railway)
+const API_URL_RAW = 'https://operation-life-change-olc.onrender.com';   // <- your backend address (Render/Railway)
 const API_BASE_URL = (/^https?:\/\//i.test(API_URL_RAW.trim()) ? API_URL_RAW.trim() : 'https://' + API_URL_RAW.trim()).replace(/\/+$/, '');
 const SUFFIX = '@olc.com';
 
@@ -254,7 +254,44 @@ async function authCall(path, body, setMsg){
     }
   } finally { clearTimeout(slow); }
 }
-function wakeServer(){ try{ fetch(API_BASE_URL + '/api/health', { cache: 'no-store' }).catch(()=>{}); }catch(e){} }
+let legacyServer = !!LS.get('olc2_legacy', false), serverVer = '';
+function wakeServer(){
+  try{ fetch(API_BASE_URL + '/api/health', { cache: 'no-store' }).then(r => r.json()).then(j => {
+    serverVer = String((j && j.version) || ''); if(serverVer){ legacyServer = !/^[3-9]/.test(serverVer); LS.set('olc2_legacy', legacyServer); }
+  }).catch(() => {}); }catch(e){}
+}
+/* SYNC WITH AN OLDER (v9) BACKEND: still merges field by field on this device, so nothing vanishes even before the backend is updated */
+async function legacySync(acc, opts){
+  const id = acc.id; let guard = 0;
+  let r = await api('GET', '/api/state' + (meta.lu && !meta.fresh ? '?since=' + meta.lu : ''), null, acc.token, { timeout: 60000 });
+  if(r.status === 401){ patchAccount(id, { expired: true }); setSync('auth'); return false; }
+  if(!r.ok){ setSync('error', 'server answered ' + r.status + (r.data && r.data.error ? ': ' + r.data.error : '')); retryLater(); return false; }
+  if(r.data.state){ applyRemote(r.data.state, { replace: !!meta.fresh }); meta.lu = r.data.updatedAt; meta.fresh = false; }
+  else if(!r.data.unchanged && meta.fresh){ meta.fresh = false; meta.dirty = true; meta.seq++; }
+  while((meta.dirty || opts.force) && guard++ < 5){
+    const seq = meta.seq; persistLocal();
+    const p = await api('PUT', '/api/state', { state, baseUpdatedAt: meta.lu || 0 }, acc.token, { timeout: 80000 });
+    if(p.status === 409 && p.data && p.data.state){ applyRemote(p.data.state); meta.lu = p.data.updatedAt; meta.dirty = true; continue; }
+    if(p.status === 401){ patchAccount(id, { expired: true }); setSync('auth'); return false; }
+    if(!p.ok){ setSync('error', 'server answered ' + p.status + (p.data && p.data.error ? ': ' + p.data.error : '')); retryLater(); return false; }
+    meta.lu = p.data.updatedAt; if(meta.seq === seq) meta.dirty = false; opts.force = false;
+  }
+  return true;
+}
+function openSyncDiag(){
+  openV10Modal('<h3 style="justify-content:center;">☁ SYNC CHECK</h3><div id="diagBody" class="stat-label" style="line-height:1.7">Testing the connection…</div><button class="btn ghost" style="margin-top:10px" onclick="closeV10Modal()">Close</button>');
+  (async () => {
+    const out = []; const L = (ok, t) => out.push((ok ? '✅ ' : '❌ ') + t);
+    out.push('Backend address: ' + API_BASE_URL); const acc = loggedAccount();
+    try{ const t = Date.now(); const r = await fetch(API_BASE_URL + '/api/health', { cache: 'no-store' }); const j = await r.json().catch(() => ({})); L(r.ok, 'Server reached in ' + (Date.now() - t) + ' ms' + (j.version ? ' — backend version ' + j.version : '')); serverVer = j.version || ''; if(serverVer){ legacyServer = !/^[3-9]/.test(serverVer); LS.set('olc2_legacy', legacyServer); }
+      L(!legacyServer, legacyServer ? 'Backend is the OLD version (v9). OLC still syncs and merges safely, but live updates, shared catalog and cloud pictures/PDF need the new backend folder redeployed.' : 'Backend is up to date (live sync, shared catalog and file storage active)'); }
+    catch(e){ L(false, 'Cannot reach the server. Wrong address, server asleep (wait 1 minute and retry), or no internet.'); }
+    if(acc && acc.token){ try{ const r = await api('GET', legacyServer ? '/api/state' : '/api/sync?v=0', null, acc.token, { timeout: 40000 }); L(r.ok, r.ok ? 'Signed in and data readable' : r.status === 401 ? 'Session rejected (401) — sign out and sign in again; the address may point to a different server/database than the one your account was created on.' : 'Server answered ' + r.status + (r.data && r.data.error ? ': ' + r.data.error : '')); }catch(e){ L(false, 'Data request failed: ' + (e && e.message)); } }
+    else out.push('⚠ Not signed in to a cloud account on this device.');
+    out.push('This device: ' + (meta.dirty ? 'has changes waiting to upload' : 'everything uploaded'));
+    const el = document.getElementById('diagBody'); if(el) el.innerHTML = out.map(x => esc(x)).join('<br>') + '<div style="margin-top:12px"><button class="btn sm" onclick="closeV10Modal();manualSyncNow()">Sync now</button></div>';
+  })();
+}
 
 let syncing = false, syncAgain = false, backoff = 0, lastSyncOk = 0, pendingRender = false, refreshTimer = null;
 function schedulePush(ms){ clearTimeout(pushTimer); pushTimer = setTimeout(() => syncNow(), ms); }
@@ -277,6 +314,7 @@ async function syncNow(opts){
     if(typeof Blobs !== 'undefined') await Blobs.uploadPending(acc).catch(() => {});   // files first, so other devices can open them
     if(activeAccountId !== id) return;
     const seq = meta.seq, t0 = Date.now();
+    if(legacyServer){ const okL = await legacySync(acc, opts); if(okL){ lastSyncOk = Date.now(); backoff = 0; LS.set(metaKey(id), meta); setSync(meta.dirty ? 'pending' : 'ok'); if(meta.dirty) schedulePush(600); } return; }
     let r, posted = false;
     if(meta.fresh && !opts.force) r = await api('GET', '/api/sync?v=0', null, acc.token, { timeout: 45000 });
     else if(meta.dirty || opts.force || !meta.v){ posted = true; r = await api('POST', '/api/sync', { state, device: deviceId }, acc.token, { timeout: 70000 }); }
@@ -286,7 +324,7 @@ async function syncNow(opts){
     if(r.status === 401){ patchAccount(id, { expired: true }); setSync('auth'); return; }
     if(r.status === 426){ setSync('error', 'update needed'); toast('A newer version of OLC is ready — close the app completely and open it again.', 9000); return; }
     if(r.status === 413){ setSync('error', 'data too large'); toast('⚠ Your data is too large to sync — remove some big uploaded images.', 7000); return; }
-    if(r.status === 404){ setSync('error', 'server is the OLD version'); toast('Sync: your backend on Render is still the old version (v9). Upload the v10 backend folder to GitHub and redeploy it, then reopen OLC.', 12000); retryLater(); return; }
+    if(r.status === 404){ legacyServer = true; LS.set('olc2_legacy', true); toast('Connected to your older backend — your data syncs safely. Redeploy the new backend for live updates, shared catalog and cloud pictures/PDFs.', 9000); schedulePush(100); return; }
     if(!r.ok){ setSync('error', 'server answered ' + r.status + (r.data && r.data.error ? ': ' + r.data.error : '')); retryLater(); return; }
     backoff = 0;
     const d = r.data;
@@ -300,6 +338,7 @@ async function syncNow(opts){
     LS.set(metaKey(id), meta);
     setSync(meta.dirty ? 'pending' : 'ok');
     if(meta.dirty) schedulePush(600);
+    if(typeof catSync === 'function') setTimeout(catSync, 50);
   }catch(e){ setSync(navigator.onLine === false ? 'offline' : 'error', 'cannot reach ' + API_BASE_URL + ' (' + (e && e.name === 'AbortError' ? 'timed out — server may be waking up' : 'blocked or wrong address') + ')'); retryLater(); }
   finally{ syncing = false; if(syncAgain){ syncAgain = false; schedulePush(250); } }
 }
@@ -307,15 +346,16 @@ async function syncNow(opts){
 function applyRemote(remote, opts){
   opts = opts || {};
   commitLocal();                                                // edits made while the request was travelling
-  let next, changed;
+  let next, changed, localExtra = false;
   if(opts.replace){ next = hydrateState(clone(remote)); changed = true; }
   else {
     const r = OLCMerge.merge(state, remote);
     hlc = Math.max(hlc, r.maxStamp);
-    next = hydrateState(r.state); changed = r.fromB;
+    next = hydrateState(r.state); changed = r.fromB; localExtra = r.fromA;
   }
   if(!changed) return false;
-  const keep = { v: meta.v, dirty: meta.dirty, seq: meta.seq, fresh: false };
+  const keep = Object.assign({}, meta, { fresh: false });
+  if(localExtra){ keep.dirty = true; keep.seq = (keep.seq || 0) + 1; }
   useState(next, keep);
   LS.set(stateKey(activeAccountId), state); LS.set(metaKey(activeAccountId), meta);
   refreshUI();
@@ -348,7 +388,7 @@ async function manualSyncNow(){
 function syncPillClick(){
   const acc = loggedAccount();
   if(syncInfo.status === 'auth' && acc) return reauth(acc);
-  if(syncInfo.status === 'error' && syncInfo.msg) toast('Sync problem: ' + syncInfo.msg, 9000);
+  if(syncInfo.status === 'error') return openSyncDiag();
   manualSyncNow();
 }
 // compatibility names used elsewhere in the app
@@ -365,6 +405,7 @@ async function liveLoop(){
     const ctrl = new AbortController(); liveCtrl = ctrl;
     try{
       const res = await fetch(API_BASE_URL + '/api/events?device=' + encodeURIComponent(deviceId), { headers: { Authorization: 'Bearer ' + acc.token }, signal: ctrl.signal });
+      if(res.status === 404){ liveWanted = false; return; }
       if(!res.ok || !res.body) throw new Error('no stream');
       liveUp = true; wait = 1500;
       const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
@@ -375,7 +416,7 @@ async function liveLoop(){
         while((i = buf.indexOf('\n\n')) >= 0){
           const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
           const m = chunk.match(/^data: (.*)$/m);
-          if(m){ try{ const ev = JSON.parse(m[1]); if(ev && ev.v && ev.v !== meta.v) schedulePush(80); }catch(e){} }
+          if(m){ try{ const ev = JSON.parse(m[1]); if(ev && ev.cat && typeof catSync === 'function') catSync(); if(ev && ev.v && ev.v !== meta.v) schedulePush(80); }catch(e){} }
         }
       }
     }catch(e){ /* reconnect below */ }

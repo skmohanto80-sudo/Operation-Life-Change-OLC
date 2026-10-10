@@ -14,7 +14,8 @@ Needs two free things:
 3. Build command: `npm install`   Start command: `npm start`
 4. Environment variables:
    - `DATABASE_URL` = the Neon connection string  ← **required**
-   - `OLC_ADMIN_KEY` = any secret (optional, enables read-only `/admin?key=...`)
+   - `OLC_ADMIN_KEY` = a long secret only you know (turns on the owner panel at `https://YOUR-SERVICE.onrender.com/admin`)
+   - `OLC_CATALOG_EDIT` = `anyone` (default: every account may edit shared ranks/medals/badges/divisions) or `owner` (only the creating account)
 5. Deploy. Open `https://YOUR-SERVICE.onrender.com/api/health` — it must show `"storage":"postgres"`.
 
 If your Render address is not `https://operation-life-change-olc.onrender.com`, change `API_BASE_URL` at the top of `frontend/auth.js`.
@@ -29,3 +30,16 @@ It saved to a file (`db.json`). Render's free disk is wiped on every restart/red
 
 ## Test
 `npm install && npm test && node test/frontend.js && node test/sections.js` (uses an in-memory database).
+
+
+## Owner panel (see every account / control the server)
+Set `OLC_ADMIN_KEY` on Render, redeploy, open `/admin`, type the key (it is sent in a header, never in the URL).
+You can: see server totals; list every account with last activity, devices and data size; download any account's data; restore its backups;
+sign it out everywhere; reset its password (shows a new password + recovery code once); delete it (type its exact username);
+remove a shared medal/badge/division/rank for everyone; close or open new sign-ups; export the whole server.
+Passwords are stored hashed, so nobody (including you) can read them — you can only reset them.
+
+## Shared catalog
+Ranks (XP thresholds), medals, badges and divisions are shared by ALL accounts on this server. Each account keeps its own progress,
+earned achievements, times earned and which division is ON. Files (pictures/PDFs) are shared by content as well.
+Deploy order: backend first, then the frontend.

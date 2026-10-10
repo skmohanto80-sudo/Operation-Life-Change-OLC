@@ -99,7 +99,7 @@ const Blobs = (function(){
   }
   async function uploadPending(acc){
     acc = acc || (typeof loggedAccount === 'function' ? loggedAccount() : null);
-    if(!acc || !acc.token) return;
+    if(!acc || !acc.token || (typeof legacyServer !== 'undefined' && legacyServer)) return;
     const db = await open(); let list = [];
     if(db){ try{ list = (await req(tx(db, 'readonly').index('up').getAll(0))) || []; }catch(e){} }
     else list = [...mem.values()].filter((r) => !r.up);

@@ -16,7 +16,15 @@ const Merge = require('./merge');
 
 const PORT = process.env.PORT || 4000;
 const ADMIN_KEY = process.env.OLC_ADMIN_KEY || '';
-const VERSION = '3.0.0';
+const VERSION = '4.0.0';
+const CATALOG_EDIT = (process.env.OLC_CATALOG_EDIT || 'anyone').toLowerCase();   // 'anyone' = every account may edit shared items; 'owner' = only the account that created it
+const CAT_FIELDS = {
+  medal: ['name', 'requirements', 'connection', 'connectionKey', 'target', 'colors', 'why', 'medalImg', 'ribbonImg', 'createdDate'],
+  badge: ['name', 'requirements', 'connection', 'connectionKey', 'target', 'colors', 'why', 'badgeImg', 'createdDate'],
+  division: ['division', 'name', 'logo', 'flag', 'colors', 'systemTheme', 'durationDays', 'start', 'end', 'mission', 'objective', 'books', 'createdAt'],
+  rank: ['xp'],
+};
+const MAX_CAT_ITEM = 3 * 1024 * 1024;
 const MAX_BLOB_BYTES = 40 * 1024 * 1024;
 const MAX_USER_BLOB_BYTES = (Number(process.env.OLC_BLOB_QUOTA_MB) || 300) * 1024 * 1024;
 
@@ -164,6 +172,7 @@ async function main() {
 
   app.post('/api/register', wrap(async (req, res) => {
     if (limited('reg:' + req.ip, 20, 3600e3)) return fail(res, 429, 'Too many sign-ups from this network. Try again later.');
+    if ((await setting('registration', 'open')) === 'closed') return fail(res, 403, 'New sign-ups are closed on this server. Ask the owner.', { code: 'closed' });
     const { password, avatar, device } = req.body || {};
     const username = normalizeUsername(req.body && req.body.username);
     const ue = usernameError(username); if (ue) return fail(res, 400, ue, { field: 'username' });
@@ -291,6 +300,9 @@ async function main() {
     const line = 'data: ' + JSON.stringify(payload) + '\n\n';
     for (const r of set) { if (exceptDevice && r.olcDevice === exceptDevice) continue; try { r.write(line); } catch (e) { /* closed */ } }
   }
+  function broadcastAll(payload, exceptUser) {
+    for (const [uid2, set] of listeners) { if (exceptUser && uid2 === exceptUser) { /* the sender still gets it on its other devices */ } for (const r of set) { try { r.write('data: ' + JSON.stringify(payload) + '\n\n'); } catch (e) {} } }
+  }
   app.get('/api/events', auth, (req, res) => {
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.flushHeaders && res.flushHeaders();
@@ -366,7 +378,7 @@ async function main() {
     const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     if (!buf.length) return fail(res, 400, 'Empty file');
     const mime = String(req.query.m || 'application/octet-stream').slice(0, 80).replace(/[^A-Za-z0-9.+\-\/]/g, '');
-    const have = await db.query(`SELECT 1 FROM blobs WHERE user_id=$1 AND id=$2`, [req.user.id, req.params.id]);
+    const have = await db.query(`SELECT 1 FROM blobs WHERE id=$1`, [req.params.id]);       // files are named by their content, so they are shared between accounts
     if (have.rows.length) return res.json({ ok: true, existed: true });
     const used = await db.query(`SELECT COALESCE(SUM(size),0) AS n FROM blobs WHERE user_id=$1`, [req.user.id]);
     if (Number(used.rows[0].n) + buf.length > MAX_USER_BLOB_BYTES) return fail(res, 413, 'Cloud file storage is full', { code: 'quota' });
@@ -376,7 +388,7 @@ async function main() {
   }));
   app.get('/api/blobs/:id', auth, wrap(async (req, res) => {
     if (!okId(req.params.id)) return fail(res, 400, 'Bad file id');
-    const r = await db.query(`SELECT mime, data FROM blobs WHERE user_id=$1 AND id=$2`, [req.user.id, req.params.id]);
+    const r = await db.query(`SELECT mime, data FROM blobs WHERE id=$1 LIMIT 1`, [req.params.id]);
     if (!r.rows.length) return fail(res, 404, 'File not found');
     res.set({ 'Content-Type': r.rows[0].mime, 'Cache-Control': 'private, max-age=31536000, immutable' });
     res.send(Buffer.from(r.rows[0].data));
@@ -384,8 +396,8 @@ async function main() {
   app.post('/api/blobs/have', auth, wrap(async (req, res) => {
     const ids = ((req.body || {}).ids || []).filter(okId).slice(0, 200);
     if (!ids.length) return res.json({ have: [] });
-    const ph = ids.map((_, i) => '$' + (i + 2)).join(',');
-    const r = await db.query(`SELECT id FROM blobs WHERE user_id=$1 AND id IN (${ph})`, [req.user.id, ...ids]);
+    const ph = ids.map((_, i) => '$' + (i + 1)).join(',');
+    const r = await db.query(`SELECT DISTINCT id FROM blobs WHERE id IN (${ph})`, ids);
     res.json({ have: r.rows.map((x) => x.id) });
   }));
 
@@ -408,28 +420,132 @@ async function main() {
     res.json({ state: r.rows[0].data ? safeParse(r.rows[0].data) : null });
   }));
 
-  /* ---------- admin (read-only, needs OLC_ADMIN_KEY) ---------- */
+  /* ---------- SHARED CATALOG: medals, badges and divisions are shared by every account; progress and ON/OFF stay per account ---------- */
+  let catLast = 0;
+  async function catStamp() {
+    if (!catLast) { const m = await db.query(`SELECT MAX(updated_at) AS m FROM catalog`); catLast = Number(m.rows[0] && m.rows[0].m) || 0; }
+    catLast = Math.max(Date.now(), catLast + 1); return catLast;
+  }
+  const okCatId = (id) => /^[A-Za-z0-9_-]{4,80}$/.test(String(id || ''));
+  function catClean(kind, data) {
+    const out = {}; const src = data && typeof data === 'object' ? data : {};
+    for (const k of CAT_FIELDS[kind]) if (src[k] !== undefined && src[k] !== null) out[k] = src[k];
+    return out;
+  }
+  app.get('/api/catalog', auth, wrap(async (req, res) => {
+    const since = Number(req.query.since || 0) || 0;
+    const r = await db.query(`SELECT kind, id, data, edited_at, updated_at, deleted FROM catalog WHERE updated_at > $1 ORDER BY updated_at`, [since]);
+    const items = r.rows.map((x) => ({ kind: x.kind, id: x.id, at: Number(x.edited_at), u: Number(x.updated_at), deleted: !!Number(x.deleted), data: Number(x.deleted) ? null : safeParse(x.data) }));
+    res.json({ items, max: items.length ? items[items.length - 1].u : since, t: Date.now() });
+  }));
+  app.post('/api/catalog', auth, wrap(async (req, res) => {
+    const body = req.body || {}, items = Array.isArray(body.items) ? body.items.slice(0, 100) : [], dels = Array.isArray(body.deletes) ? body.deletes.slice(0, 100) : [];
+    const accepted = [], rejected = []; let changed = false;
+    const apply = async (kind, id, at, data, del) => {
+      if (!CAT_FIELDS[kind] || !okCatId(id)) { rejected.push({ kind, id, why: 'bad item' }); return; }
+      at = Number(at) || Date.now();
+      let text = '{}';
+      if (!del) { text = JSON.stringify(catClean(kind, data)); if (text.length > MAX_CAT_ITEM) { rejected.push({ kind, id, why: 'too large' }); return; } }
+      const ex = (await db.query(`SELECT owner, edited_at, deleted FROM catalog WHERE kind=$1 AND id=$2`, [kind, id])).rows[0];
+      if (ex && Number(ex.edited_at) > at) { rejected.push({ kind, id, why: 'newer' }); return; }
+      if (ex && CATALOG_EDIT === 'owner' && ex.owner && ex.owner !== req.user.id) { rejected.push({ kind, id, why: 'not yours' }); return; }
+      const u = await catStamp();
+      if (ex) await db.query(`UPDATE catalog SET data=$1, edited_at=$2, updated_at=$3, deleted=$4 WHERE kind=$5 AND id=$6`, [text, at, u, del ? 1 : 0, kind, id]);
+      else await db.query(`INSERT INTO catalog (kind, id, data, owner, edited_at, updated_at, deleted) VALUES ($1,$2,$3,$4,$5,$6,$7)`, [kind, id, text, req.user.id, at, u, del ? 1 : 0]);
+      accepted.push({ kind, id, at, u }); changed = true;
+    };
+    for (const it of items) if (it) await apply(String(it.kind), String(it.id), it.at, it.data, false);
+    for (const it of dels) if (it) await apply(String(it.kind), String(it.id), it.at, null, true);
+    if (changed) broadcastAll({ cat: 1 });
+    res.json({ ok: true, accepted, rejected, t: Date.now() });
+  }));
+
+  /* ---------- ADMIN: see every account and control the backend (needs OLC_ADMIN_KEY; the page itself is at /admin) ---------- */
+  const setting = async (k, d) => { const r = await db.query(`SELECT v FROM meta WHERE k=$1`, ['set:' + k]); return r.rows.length ? r.rows[0].v : d; };
+  const setSetting = async (k, v) => { const ex = await db.query(`SELECT 1 FROM meta WHERE k=$1`, ['set:' + k]); if (ex.rows.length) await db.query(`UPDATE meta SET v=$1 WHERE k=$2`, [String(v), 'set:' + k]); else await db.query(`INSERT INTO meta (k, v) VALUES ($1,$2)`, ['set:' + k, String(v)]); };
+  const admFails = new Map();
   const admin = (req, res, next) => {
-    if (!ADMIN_KEY) return res.status(404).send('Admin viewer disabled (set OLC_ADMIN_KEY to enable).');
-    const k = req.query.key || req.headers['x-admin-key'];
-    if (k !== ADMIN_KEY) return res.status(401).send('Unauthorized');
+    if (!ADMIN_KEY) return fail(res, 404, 'Admin is switched off. Set the environment variable OLC_ADMIN_KEY on your server to turn it on.', { code: 'admin_off' });
+    const fh = admFails.get(req.ip); if (fh && fh.reset > Date.now() && fh.n >= 20) return fail(res, 429, 'Too many wrong attempts. Wait 10 minutes.');
+    const k = String(req.headers['x-admin-key'] || '');
+    const a = Buffer.from(k), b = Buffer.from(ADMIN_KEY);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) { const h0 = admFails.get(req.ip); admFails.set(req.ip, !h0 || h0.reset < Date.now() ? { n: 1, reset: Date.now() + 10 * 60e3 } : { n: h0.n + 1, reset: h0.reset }); return fail(res, 401, 'Wrong admin key', { code: 'bad_key' }); }
     next();
   };
-  const h = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  app.get('/api/admin/state/:id', admin, wrap(async (req, res) => res.json((await stateOut(req.params.id)).state)));
-  app.get('/admin', admin, wrap(async (req, res) => {
-    const r = await db.query(`SELECT u.id, u.username, u.created_at, s.updated_at, s.data FROM users u LEFT JOIN states s ON s.user_id=u.id ORDER BY u.created_at`);
-    const rows = r.rows.map(u => {
-      const st = u.data ? safeParse(u.data) : null;
-      return `<tr><td>${h(u.username)}</td><td>${st ? h(st.xp) : '—'}</td><td>${st && st.dailyLogs ? Object.keys(st.dailyLogs).length : 0}</td>
-        <td>${u.data ? Math.round(u.data.length / 1024) + ' KB' : '—'}</td><td>${u.updated_at ? new Date(Number(u.updated_at)).toISOString() : '—'}</td>
-        <td><a href="/api/admin/state/${h(u.id)}?key=${encodeURIComponent(req.query.key)}" target="_blank">view JSON</a></td></tr>`;
-    }).join('');
-    res.send(`<!DOCTYPE html><meta charset="utf-8"><title>OLC Admin</title><style>body{font-family:system-ui;background:#0b0714;color:#f4f1fb;padding:24px}
-      table{border-collapse:collapse;width:100%}th,td{border:1px solid #6753b7;padding:8px 12px;text-align:left;font-size:14px}th{background:#1a1226}a{color:#01c4c4}</style>
-      <h1>OLC — Admin (read-only)</h1><p>${r.rows.length} account(s) · storage: ${h(db.kind)}</p>
-      <table><tr><th>Username</th><th>XP</th><th>Days logged</th><th>Size</th><th>Last saved</th><th></th></tr>${rows || '<tr><td colspan=6>No accounts yet</td></tr>'}</table>`);
+  app.get('/admin', (req, res) => res.sendFile(require('path').join(__dirname, 'admin.html')));
+  app.get('/api/admin/overview', admin, wrap(async (req, res) => {
+    const n = async (q) => Number(((await db.query(q)).rows[0] || {}).n) || 0;
+    res.json({ version: VERSION, storage: db.kind, uptimeMin: Math.round(process.uptime() / 60), users: await n(`SELECT COUNT(*) AS n FROM users`), sessions: await n(`SELECT COUNT(*) AS n FROM sessions`),
+      stateKB: Math.round((await db.query(`SELECT data FROM states`)).rows.reduce((a, r) => a + String(r.data == null ? '' : typeof r.data === 'string' ? r.data : JSON.stringify(r.data)).length, 0) / 1024), blobs: await n(`SELECT COUNT(*) AS n FROM blobs`), blobMB: +(await n(`SELECT COALESCE(SUM(size),0) AS n FROM blobs`) / 1048576).toFixed(1),
+      catalog: await n(`SELECT COUNT(*) AS n FROM catalog WHERE deleted=0`), registration: await setting('registration', 'open'), catalogEdit: CATALOG_EDIT, live: [...listeners.values()].reduce((a, s) => a + s.size, 0) });
   }));
+  app.get('/api/admin/users', admin, wrap(async (req, res) => {
+    const r = await db.query(`SELECT u.id, u.username, u.created_at, s.updated_at, s.data FROM users u LEFT JOIN states s ON s.user_id=u.id ORDER BY u.created_at`);
+    const ss = (await db.query(`SELECT user_id, COUNT(*) AS c, MAX(last_seen) AS m FROM sessions GROUP BY user_id`)).rows, sm = Object.fromEntries(ss.map((x) => [x.user_id, x]));
+    const bl = (await db.query(`SELECT user_id, COALESCE(SUM(size),0) AS b FROM blobs GROUP BY user_id`)).rows, bm = Object.fromEntries(bl.map((x) => [x.user_id, Number(x.b)]));
+    res.json({ users: r.rows.map((u) => { const st = u.data ? safeParse(u.data) : null; const se = sm[u.id];
+      return { id: u.id, username: u.username, createdAt: Number(u.created_at), lastSaved: u.updated_at ? Number(u.updated_at) : null, lastSeen: se ? Number(se.m) : null, devices: se ? Number(se.c) : 0,
+        xp: st ? Number(st.xp) || 0 : 0, daysLogged: st && st.dailyLogs ? Object.keys(st.dailyLogs).length : 0, stateKB: u.data ? Math.round(u.data.length / 1024) : 0, fileMB: +((bm[u.id] || 0) / 1048576).toFixed(2), codename: st && st.profile ? (st.profile.codename || st.profile.name || '') : '' }; }) });
+  }));
+  app.get('/api/admin/users/:id', admin, wrap(async (req, res) => {
+    const u = (await db.query(`SELECT id, username, created_at, avatar FROM users WHERE id=$1`, [req.params.id])).rows[0]; if (!u) return fail(res, 404, 'No such account');
+    const st = (await stateOut(u.id)).state || {};
+    const sessions = (await db.query(`SELECT id, device, created_at, last_seen FROM sessions WHERE user_id=$1 ORDER BY last_seen DESC`, [u.id])).rows.map((x) => ({ id: x.id, device: x.device, createdAt: Number(x.created_at), lastSeen: Number(x.last_seen) }));
+    const backups = (await db.query(`SELECT id, created_at, data FROM state_backups WHERE user_id=$1 ORDER BY created_at DESC`, [u.id])).rows.map((x) => ({ id: x.id, createdAt: Number(x.created_at), kb: Math.round(String(typeof x.data === 'string' ? x.data : JSON.stringify(x.data || '')).length / 1024) }));
+    const act = (st.divisions || []).find((d) => d.id === st.activeDivisionId);
+    res.json({ id: u.id, username: u.username, avatar: u.avatar || null, createdAt: Number(u.created_at), sessions, backups,
+      summary: { codename: (st.profile && (st.profile.codename || st.profile.name)) || '', xp: Number(st.xp) || 0, daysLogged: Object.keys(st.dailyLogs || {}).length, achievements: (st.achievements || []).length, goals: (st.goals || []).length, activeDivision: act ? (act.name || act.division) : null } });
+  }));
+  app.get('/api/admin/users/:id/state', admin, wrap(async (req, res) => { const st = await stateOut(req.params.id); res.set('Content-Disposition', 'attachment; filename="olc-' + String(req.params.id).replace(/[^\w-]/g, '') + '.json"'); res.json(st.state || {}); }));
+  app.post('/api/admin/users/:id/reset-password', admin, wrap(async (req, res) => {
+    const u = (await db.query(`SELECT id FROM users WHERE id=$1`, [req.params.id])).rows[0]; if (!u) return fail(res, 404, 'No such account');
+    let pw = String((req.body && req.body.newPassword) || '');
+    if (pw) { const pe = passwordError(pw); if (pe) return fail(res, 400, pe); }
+    else { const al = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; for (let t = 0; t < 20; t++) { pw = Array.from(crypto.randomBytes(10), (b) => al[b % al.length]).join(''); if (!passwordError(pw) && !(await db.query(`SELECT 1 FROM users WHERE pass_fp=$1`, [fp(pw)])).rows.length) break; } }
+    if ((await db.query(`SELECT id FROM users WHERE pass_fp=$1 AND id<>$2`, [fp(pw), u.id])).rows.length) return fail(res, 409, 'That password is used by another account');
+    const recovery = newRecoveryCode();
+    await db.query(`UPDATE users SET pass_hash=$1, pass_fp=$2, rec_hash=$3, rec_fp=$4 WHERE id=$5`, [await hashSecret(pw), fp(pw), await hashSecret(normRecovery(recovery)), fp(normRecovery(recovery)), u.id]);
+    await db.query(`DELETE FROM sessions WHERE user_id=$1`, [u.id]);
+    res.json({ ok: true, newPassword: pw, recoveryCode: recovery });
+  }));
+  app.post('/api/admin/users/:id/signout-all', admin, wrap(async (req, res) => { await db.query(`DELETE FROM sessions WHERE user_id=$1`, [req.params.id]); res.json({ ok: true }); }));
+  app.post('/api/admin/users/:id/restore/:bid', admin, wrap(async (req, res) => {
+    const b = (await db.query(`SELECT data FROM state_backups WHERE id=$1 AND user_id=$2`, [req.params.bid, req.params.id])).rows[0]; if (!b) return fail(res, 404, 'Backup not found');
+    const cur = (await db.query(`SELECT data, updated_at, version FROM states WHERE user_id=$1`, [req.params.id])).rows[0];
+    if (cur) await maybeBackup(req.params.id, cur, true);
+    const stamp = Math.max(Date.now(), cur ? Number(cur.updated_at) + 1 : 0);
+    if (cur) await db.query(`UPDATE states SET data=$1, updated_at=$2, version=version+1 WHERE user_id=$3`, [b.data, stamp, req.params.id]);
+    else await db.query(`INSERT INTO states (user_id, data, updated_at, version) VALUES ($1,$2,$3,1)`, [req.params.id, b.data, stamp]);
+    res.json({ ok: true, note: 'Restored on the server. Devices keep their own newer edits when they merge — to force the restore everywhere, sign the account out of its devices.' });
+  }));
+  app.delete('/api/admin/users/:id', admin, wrap(async (req, res) => {
+    const u = (await db.query(`SELECT username FROM users WHERE id=$1`, [req.params.id])).rows[0]; if (!u) return fail(res, 404, 'No such account');
+    if (String((req.body || {}).confirm || '').toLowerCase() !== u.username.toLowerCase()) return fail(res, 400, 'Type the exact username to confirm deleting it.');
+    for (const t of ['sessions', 'states', 'state_backups', 'blobs']) await db.query(`DELETE FROM ${t} WHERE user_id=$1`, [req.params.id]);
+    await db.query(`DELETE FROM users WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  }));
+  app.get('/api/admin/catalog', admin, wrap(async (req, res) => {
+    const r = await db.query(`SELECT c.kind, c.id, c.data, c.owner, c.edited_at, c.deleted, u.username FROM catalog c LEFT JOIN users u ON u.id=c.owner ORDER BY c.updated_at DESC`);
+    res.json({ items: r.rows.map((x) => { const d = Number(x.deleted) ? {} : safeParse(x.data) || {}; return { kind: x.kind, id: x.id, name: d.name || '', division: d.division || '', owner: x.username || '', editedAt: Number(x.edited_at), deleted: !!Number(x.deleted) }; }) });
+  }));
+  app.delete('/api/admin/catalog/:kind/:id', admin, wrap(async (req, res) => {
+    if (!CAT_FIELDS[req.params.kind]) return fail(res, 400, 'Bad kind');
+    const u = await catStamp();
+    const r = await db.query(`UPDATE catalog SET data='{}', deleted=1, edited_at=$1, updated_at=$2 WHERE kind=$3 AND id=$4`, [Date.now(), u, req.params.kind, req.params.id]);
+    broadcastAll({ cat: 1 }); res.json({ ok: true, changed: r.rowCount });
+  }));
+  app.post('/api/admin/settings', admin, wrap(async (req, res) => {
+    const b = req.body || {}; if (b.registration === 'open' || b.registration === 'closed') await setSetting('registration', b.registration);
+    res.json({ ok: true, registration: await setting('registration', 'open') });
+  }));
+  app.get('/api/admin/export', admin, wrap(async (req, res) => {
+    const r = await db.query(`SELECT u.id, u.username, u.created_at, s.data FROM users u LEFT JOIN states s ON s.user_id=u.id ORDER BY u.created_at`);
+    const cat = await db.query(`SELECT kind, id, data, owner, edited_at, deleted FROM catalog`);
+    res.set('Content-Disposition', 'attachment; filename="olc-server-export-' + new Date().toISOString().slice(0, 10) + '.json"');
+    res.json({ exportedAt: new Date().toISOString(), version: VERSION, accounts: r.rows.map((u) => ({ id: u.id, username: u.username, createdAt: Number(u.created_at), state: u.data ? safeParse(u.data) : null })), catalog: cat.rows.map((x) => ({ kind: x.kind, id: x.id, owner: x.owner, editedAt: Number(x.edited_at), deleted: !!Number(x.deleted), data: safeParse(x.data) })) });
+  }));
+  app.get('/api/admin/state/:id', admin, wrap(async (req, res) => res.json((await stateOut(req.params.id)).state)));
 
   /* ---------- errors ---------- */
   app.use((req, res) => fail(res, 404, 'Not found'));

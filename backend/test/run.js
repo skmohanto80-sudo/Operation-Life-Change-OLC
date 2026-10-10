@@ -112,7 +112,8 @@ const { main } = require('../server');
 
   // isolation
   r = await call('GET', '/api/sync?v=0', null, b.token); assert.equal(r.body.state, null); ok('accounts isolated');
-  r = await fetch(base + '/api/blobs/b_test_pdf_001', { headers: { Authorization: 'Bearer ' + b.token } }); assert.equal(r.status, 404); ok('files isolated per account');
+  r = await fetch(base + '/api/blobs/b_test_pdf_001', { headers: { Authorization: 'Bearer ' + b.token } }); assert.equal(r.status, 200); ok('files are shared by content between accounts (so shared medals/divisions show their pictures)');
+  r = await call('POST', '/api/blobs/have', { ids: ['b_test_pdf_001'] }, b.token); assert.deepEqual(r.body.have, ['b_test_pdf_001']); ok('other account sees the file as already stored');
 
   // recovery
   r = await call('POST', '/api/recover', { username: 'Abcdefg1', recoveryCode: 'AAAA-BBBB-CCCC', newPassword: 'brand-new-1' }); assert.equal(r.status, 401);
@@ -139,8 +140,44 @@ const { main } = require('../server');
   r = await call('POST', '/api/login', { username: 'Abcdefg1', password: 'x', junk: 'x'.repeat(8 * 1024 * 1024) }); assert.equal(r.status, 401); ok('8 MB request body accepted by server');
   r = await call('POST', '/api/login', { username: 'Abcdefg1', password: 'x', junk: 'x'.repeat(30 * 1024 * 1024) }); assert.equal(r.status, 413); assert.equal(r.body.code, 'too_large'); ok('30 MB rejected with a clear message');
 
-  // admin
-  const ad = await fetch(base + '/admin?key=k'); assert.equal(ad.status, 200); assert.equal((await fetch(base + '/admin?key=bad')).status, 401); ok('admin viewer (key protected)');
+  // ---- shared catalog ----
+  const tA = (await call('POST', '/api/login', { username: 'Abcdefg1', password: 'another-pw-2', device: 'Catalog' })).body.token, tB = b.token; assert.ok(tA && tB);
+  let T0 = Date.now();
+  r = await call('POST', '/api/catalog', { items: [{ kind: 'medal', id: 'medal_one', at: ++T0, data: { name: 'Iron Will', target: 5, colors: ['#111', '#222', '#333'], timesEarned: 99, current: 4, secret: 'x' } }, { kind: 'division', id: 'div_one', at: ++T0, data: { division: 'D1', name: 'Alpha', colors: { primary: '#fff' }, reasonLog: [{ reason: 'private' }] } }, { kind: 'bogus', id: 'bad_one', at: T0, data: {} }] }, tA);
+  assert.equal(r.status, 200); assert.equal(r.body.accepted.length, 2); assert.equal(r.body.rejected.length, 1); ok('catalog: account A shares a medal + a division (bad kind refused)');
+  r = await call('GET', '/api/catalog?since=0', null, tB); assert.equal(r.body.items.length, 2);
+  const med = r.body.items.find((x) => x.id === 'medal_one'); assert.equal(med.data.name, 'Iron Will'); assert.equal(med.data.timesEarned, undefined); assert.equal(med.data.current, undefined); assert.equal(med.data.secret, undefined);
+  assert.equal(r.body.items.find((x) => x.id === 'div_one').data.reasonLog, undefined); ok('catalog: account B sees them; progress / private fields are never shared');
+  const since = r.body.max;
+  r = await call('GET', '/api/catalog?since=' + since, null, tB); assert.equal(r.body.items.length, 0); ok('catalog: incremental pull is empty when nothing changed');
+  r = await call('POST', '/api/catalog', { items: [{ kind: 'medal', id: 'medal_one', at: ++T0, data: { name: 'Iron Will II', target: 6 } }] }, tB); assert.equal(r.body.accepted.length, 1);
+  r = await call('POST', '/api/catalog', { items: [{ kind: 'medal', id: 'medal_one', at: T0 - 50, data: { name: 'stale edit' } }] }, tA); assert.equal(r.body.rejected[0].why, 'newer'); ok('catalog: latest edit wins, a stale edit is refused');
+  r = await call('GET', '/api/catalog?since=' + since, null, tA); assert.equal(r.body.items.length, 1); assert.equal(r.body.items[0].data.name, 'Iron Will II'); ok('catalog: A receives B\'s edit');
+  r = await call('POST', '/api/catalog', { deletes: [{ kind: 'division', id: 'div_one', at: ++T0 }] }, tA); assert.equal(r.body.accepted.length, 1);
+  r = await call('GET', '/api/catalog?since=' + since, null, tB); assert.ok(r.body.items.some((x) => x.id === 'div_one' && x.deleted)); ok('catalog: deletion reaches every account');
+  const ac2 = new AbortController(); const ev2 = await fetch(base + '/api/events?device=cat', { headers: { Authorization: 'Bearer ' + tB }, signal: ac2.signal }); const rd2 = ev2.body.getReader(); let got2 = '';
+  const waitCat = (async () => { for (;;) { const { value, done } = await rd2.read(); if (done) return; got2 += Buffer.from(value).toString(); if (got2.includes('"cat":1')) return; } })();
+  await new Promise((r2) => setTimeout(r2, 120)); await call('POST', '/api/catalog', { items: [{ kind: 'badge', id: 'badge_one', at: ++T0, data: { name: 'Marksman' } }] }, tA);
+  await Promise.race([waitCat, new Promise((_, rej) => setTimeout(() => rej(new Error('no catalog live event')), 3000))]); ac2.abort(); ok('catalog: other accounts are told live');
+  r = await call('POST', '/api/catalog', { items: [{ kind: 'medal', id: 'big_one_x', at: ++T0, data: { name: 'x', medalImg: 'A'.repeat(3.2 * 1024 * 1024) } }] }, tA); assert.equal(r.body.rejected[0].why, 'too large'); ok('catalog: oversized item refused');
+
+  // ---- admin ----
+  const adm = (m, p, body) => fetch(base + p, { method: m, headers: Object.assign({ 'x-admin-key': 'k' }, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify(body) : undefined }).then(async (x) => ({ status: x.status, body: await x.json().catch(() => ({})) }));
+  assert.equal((await fetch(base + '/admin')).status, 200); assert.equal((await fetch(base + '/api/admin/overview')).status, 401); assert.equal((await fetch(base + '/api/admin/overview', { headers: { 'x-admin-key': 'bad' } })).status, 401); assert.equal((await fetch(base + '/api/admin/overview?key=k')).status, 401); ok('admin: page loads; API refuses missing / wrong key (key in the URL is not accepted)');
+  r = await adm('GET', '/api/admin/overview'); assert.equal(r.status, 200); assert.ok(r.body.users >= 2 && r.body.catalog >= 2 && r.body.version === '4.0.0'); ok('admin: overview');
+  r = await adm('GET', '/api/admin/users'); assert.ok(r.body.users.length >= 2 && r.body.users.every((u) => u.username && !('pass_hash' in u))); const uA = r.body.users.find((u) => /^abcdefg1@/i.test(u.username)) || r.body.users[0]; ok('admin: list of every account (no passwords exposed)');
+  r = await adm('GET', '/api/admin/users/' + uA.id); assert.equal(r.status, 200); assert.ok(Array.isArray(r.body.sessions) && r.body.summary); ok('admin: account detail (devices, backups, summary)');
+  r = await adm('GET', '/api/admin/users/' + uA.id + '/state'); assert.equal(r.status, 200); ok('admin: download an account\'s data');
+  const reg = await adm('POST', '/api/admin/settings', { registration: 'closed' }); assert.equal(reg.body.registration, 'closed');
+  r = await call('POST', '/api/register', { username: 'Zzzzzzz9@olc.com', password: 'Qw3rtyuz', device: 'x' }); assert.equal(r.status, 403); await adm('POST', '/api/admin/settings', { registration: 'open' }); ok('admin: closing sign-ups blocks new accounts, reopening works');
+  r = await call('POST', '/api/register', { username: 'Dispos4b@olc.com', password: 'Zx8cvbnm', device: 'x' }); assert.equal(r.status, 200); const dispId = r.body.user.id;
+  r = await adm('POST', '/api/admin/users/' + dispId + '/reset-password', {}); assert.equal(r.status, 200); const newPw = r.body.newPassword; assert.ok(newPw.length >= 8 && r.body.recoveryCode);
+  r = await call('POST', '/api/login', { username: 'Dispos4b@olc.com', password: newPw, device: 'x' }); assert.equal(r.status, 200); ok('admin: reset password gives working new sign-in details');
+  r = await adm('DELETE', '/api/admin/users/' + dispId, { confirm: 'wrong' }); assert.equal(r.status, 400);
+  r = await adm('DELETE', '/api/admin/users/' + dispId, { confirm: 'dispos4b@olc.com' }); assert.equal(r.status, 200);
+  r = await call('POST', '/api/login', { username: 'Dispos4b@olc.com', password: newPw, device: 'x' }); assert.equal(r.status, 401); ok('admin: delete needs the exact username, then the account is gone');
+  r = await adm('DELETE', '/api/admin/catalog/medal/medal_one'); assert.equal(r.body.changed, 1); r = await call('GET', '/api/catalog?since=0', null, tB); assert.ok(r.body.items.find((x) => x.id === 'medal_one').deleted); ok('admin: remove a shared item for everyone');
+  r = await adm('GET', '/api/admin/export'); assert.ok(r.body.accounts.length >= 2 && Array.isArray(r.body.catalog)); ok('admin: full server export');
   console.log('\nALL BACKEND TESTS PASSED (' + n + ')');
   server.close(); process.exit(0);
 })().catch((e) => { console.error('\nTEST FAILED:', e); process.exit(1); });

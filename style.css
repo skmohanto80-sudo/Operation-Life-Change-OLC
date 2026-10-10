@@ -57,8 +57,8 @@ html[data-theme="light"] .flipbook .fb-face{ background:#fff; }
 html,body{height:100%;}
 body{
   background:
-    radial-gradient(ellipse 900px 600px at 15% -10%, color-mix(in srgb, var(--violet) 35%, transparent), transparent 60%),
-    radial-gradient(ellipse 700px 500px at 100% 0%, color-mix(in srgb, var(--cyan) 12%, transparent), transparent 55%),
+    radial-gradient(ellipse 900px 600px at 15% -10%, color-mix(in srgb, var(--violet) var(--glow-a,35%), transparent), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 100% 0%, color-mix(in srgb, var(--cyan) var(--glow-b,12%), transparent), transparent 55%),
     linear-gradient(180deg, var(--bg-0), var(--bg-1) 40%, var(--bg-2));
   color:var(--white);
   font-family:'Rajdhani', sans-serif;
@@ -73,7 +73,7 @@ body::before{
   background:repeating-linear-gradient(180deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px);
   mix-blend-mode:overlay;
 }
-::selection{ background:var(--lavender); color:#180a22; }
+::selection{ background:var(--lavender); color:var(--on-accent,#180a22); }
 ::-webkit-scrollbar{ width:8px; height:8px; }
 ::-webkit-scrollbar-thumb{ background:var(--violet); border-radius:4px; }
 ::-webkit-scrollbar-track{ background:transparent; }
@@ -135,7 +135,7 @@ h1,h2,h3,.disp{ font-family:'Orbitron', sans-serif; letter-spacing:0.04em; }
 .avatarBtn img{ width:100%; height:100%; object-fit:cover; }
 .themeToggle{ display:flex; align-items:center; gap:4px; border:1px solid var(--border); border-radius:20px; padding:3px; background:var(--panel); }
 .themeToggle button{ background:transparent; border:none; color:var(--dim); font-size:13px; padding:4px 8px; border-radius:16px; cursor:pointer; }
-.themeToggle button.active{ background:var(--lavender); color:#180a22; }
+.themeToggle button.active{ background:var(--lavender); color:var(--on-accent,#180a22); }
 
 /* ===== ID CARD 3D FLIP MODAL ===== */
 #idCardModal{ position:fixed; inset:0; z-index:9500; display:none; align-items:center; justify-content:center; background:rgba(3,2,8,0.85); backdrop-filter:blur(6px); padding:20px; }
@@ -636,3 +636,36 @@ table{ display:block; overflow-x:auto; max-width:100%; }
 
 .topbar{ overflow-x:auto; scrollbar-width:none; } .topbar::-webkit-scrollbar{ display:none; } .topbar > *{ flex-shrink:0; }
 @media (max-width:640px){ #divBtnTxt{ display:none; } #installBtn,.topbar .btn.sm:not(#menuBtn):not(#divBtn){ padding:6px 9px; } }
+
+.div-preview{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:8px 0 12px; } .pv{ border-radius:12px; padding:12px; border:1px solid rgba(128,128,128,.25); display:flex; flex-direction:column; gap:8px; }
+.pv-panel{ border-radius:8px; padding:8px 10px; font-size:14px; } .pv-row{ display:flex; gap:6px; align-items:center; } .pv-row i{ width:18px; height:18px; border-radius:50%; display:inline-block; } .pv-btn{ margin-left:auto; padding:3px 12px; border-radius:6px; font-size:12px; font-weight:700; }
+@media (max-width:520px){ .div-preview{ grid-template-columns:1fr; } }
+
+/* movable sidebar */
+.nav-drag{ cursor:grab; touch-action:none; user-select:none; font-style:normal; padding:2px 6px; opacity:.85 }
+.navbtn.dragging{ opacity:.55; outline:2px dashed var(--lavender); outline-offset:-2px; background:var(--panel-2) }
+html.side-dragging, html.side-dragging *{ cursor:grabbing !important; user-select:none }
+html.side-dragging #sidebar{ touch-action:none }
+html.side-edit .navgroup.empty-g{ display:block } html.side-edit .navgroup-body:empty{ min-height:30px; border:1px dashed var(--border-strong); border-radius:8px; margin:4px 0 }
+
+/* bigger book pages — sized by the screen height AND width so the whole page always fits, never stretched */
+.flipbook{ width:min(94vw, calc(88vh * 0.627), 880px); max-height:none; }
+@media (min-width:1500px){ .flipbook{ width:min(94vw, calc(88vh * 0.627), 1000px); } }
+.flipbook-wrap.fb-full{ position:fixed; inset:0; z-index:9000; background:var(--bg-0); justify-content:center; padding:8px; overflow:auto; margin:0; border-radius:0; }
+.flipbook-wrap.fb-full .flipbook{ width:min(100vw - 16px, calc((100vh - 76px) * 0.627)); }
+html.fb-lock{ overflow:hidden }
+
+/* phones: nothing may be cut off, home image sits on top at full width, controls shrink */
+@media (max-width:640px){
+  .hide-sm{ display:none }
+  .topbar{ gap:6px; padding-left:10px; padding-right:10px; flex-wrap:nowrap; overflow:hidden }
+  .topbar .brand .tt{ display:none }
+  .themeToggle button{ padding:4px 8px; font-size:14px; min-width:0 } .themeToggle{ padding:2px }
+  .topbar .btn.sm{ padding:6px 8px; min-width:0 } .avatarBtn{ flex:0 0 auto }
+  .rk-side{ float:none; width:100%; max-width:none; margin:0 0 14px; }
+  .rk-side-img{ max-height:210px; object-fit:cover; object-position:center 30% }
+  .grid.c2,.grid.c3,.grid.c4{ gap:12px }
+  .panel{ padding:14px }
+  h2,.pagehead h2{ font-size:clamp(18px,6vw,24px) }
+}
+@media (max-width:380px){ .topbar .hud-pill{ display:none } .themeToggle button{ padding:3px 6px } }

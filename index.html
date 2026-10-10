@@ -85,7 +85,7 @@ try{ if(localStorage.getItem('olc2_lock')) document.documentElement.classList.ad
       <button id="themeBtnLight" onclick="setTheme('light')" title="Light mode">☀️</button>
     </div>
     <button class="btn ghost sm" id="divBtn" onclick="openDivisionSwitcher()" title="Division (sets the whole system theme)">⚔ <span id="divBtnTxt">Division</span></button>
-    <button class="btn cyan sm" id="installBtn" onclick="doInstallApp()" style="display:none;" title="Install as an app">⬇ Install App</button>
+    <button class="btn cyan sm" id="installBtn" onclick="doInstallApp()" style="display:none;" title="Install as an app">⬇<span class="hide-sm"> Install App</span></button>
     <div class="avatarBtn" onclick="toggleAcctMenu(event)" title="Accounts">
       <img src="assets/profile.png" alt="Agent" id="topbarAvatarImg">
     </div>
@@ -221,6 +221,7 @@ try{ if(localStorage.getItem('olc2_lock')) document.documentElement.classList.ad
 <script src="app.js"></script>
 <script src="blobs.js"></script>
 <script src="v10.js"></script>
+<script src="catalog.js"></script>
 <script src="auth.js"></script>
 </body>
 </html>

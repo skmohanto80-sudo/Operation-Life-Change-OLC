@@ -1,7 +1,7 @@
 process.env.DATABASE_URL = 'memory'; process.env.PORT = '0';
 const fs = require('fs'), path = require('path'), vm = require('vm'), assert = require('assert');
 const { JSDOM } = require('jsdom');
-const { main } = require('../server');
+const { main } = require('./v9/server');
 const FE = path.join(__dirname, '../../frontend');
 const html = fs.readFileSync(path.join(FE, 'index.html'), 'utf8').replace(/<script[^>]*src=[^>]*><\/script>/g, '');
 const rd = (f) => fs.readFileSync(path.join(FE, f), 'utf8');
@@ -99,76 +99,5 @@ const fill = (d, o) => Object.entries(o).forEach(([id, v]) => { d.$(id).value = 
   B.ev("state.profile.cls = 'live-test'; saveState();"); await B.ev('syncNow({force:true})');
   await A.until(() => A.ev("state.profile.cls") === 'live-test', 8000); ok('live update reaches the other device by itself');
 
-  // ---- multi-account on ONE device
-  A.ev("addAccount()"); await A.until(() => A.$('authGate').style.display === 'flex');
-  A.ev("renderAuth('create')"); fill(A, { cr_user: 'Zx987654', cr_pass: 'another-pw1', cr_pass2: 'another-pw1' }); A.submit('f_create');
-  await A.until(() => A.$('olcModal').innerHTML.includes('RECOVERY CODE'));
-  A.$('recSaved').checked = true; A.$('recSaved').dispatchEvent(new A.w.Event('change')); A.$('recGo').click();
-  await A.until(() => A.ev('loggedAccount() && loggedAccount().username') === 'Zx987654@olc.com');
-  assert.equal(A.ev('state.xp'), 0); assert.equal(A.ev('getAccounts().length'), 2); ok('2nd account on same device starts with its own empty data');
-  A.ev('addXP(5); saveState();');
-  const idFirst = A.ev("getAccounts().find(a=>a.username==='Sk123456@olc.com').id");
-  await A.ev(`switchAccount('${idFirst}')`); await A.until(() => A.ev('loggedAccount().username') === 'Sk123456@olc.com');
-  assert.ok(A.ev('state.xp') >= 900, 'first account data intact: ' + A.ev('state.xp')); ok('switch back: accounts never mix');
-  A.ev('toggleAcctMenu()'); assert.ok(A.$('acctMenu').innerHTML.includes('Zx987654@olc.com') && A.$('acctMenu').innerHTML.includes('Sk123456@olc.com')); ok('device shows all accounts for one-tap switching');
-
-  // ---- uniqueness through the UI
-  let C = device(); await C.until(() => C.$('authGate').innerHTML.includes('CREATE ACCOUNT'));
-  fill(C, { cr_user: 'sK123456', cr_pass: 'whatever-9', cr_pass2: 'whatever-9' }); C.submit('f_create');
-  await C.until(() => /already taken/.test(C.$('authError').textContent)); ok('duplicate username refused (case-insensitive)');
-  fill(C, { cr_user: 'Qq555555', cr_pass: 'password1', cr_pass2: 'password1' }); C.submit('f_create');
-  await C.until(() => /already used by another account/.test(C.$('authError').textContent)); ok('duplicate password refused');
-
-  // ---- forgot password
-  C.ev("renderAuth('forgot')"); fill(C, { fr_user: 'Sk123456', fr_code: code1.toLowerCase(), fr_pass: 'new-secret-7' }); C.submit('f_forgot');
-  await C.until(() => C.$('olcModal').innerHTML.includes('RECOVERY CODE')); const code2 = C.$('recCode').textContent; assert.notEqual(code2, code1);
-  C.$('recSaved').checked = true; C.$('recSaved').dispatchEvent(new C.w.Event('change')); C.$('recGo').click();
-  await C.until(() => C.w.document.body.classList.contains('app-on')); assert.ok(C.ev('state.xp') >= 900); ok('forgot password: new password + new code, data intact');
-
-  // ---- app lock
-  A.ev('savePin("4821")'); await sleep(300);
-  assert.ok(A.store().olc2_lock);
-  A.ev('lockNow()'); assert.ok(A.w.document.documentElement.classList.contains('locked')); ok('app locks');
-  for (const k of '1111') await A.ev(`pinKey('${k}')`);
-  await sleep(300); assert.ok(A.ev('locked')); ok('wrong PIN keeps it locked');
-  for (const k of '4821') await A.ev(`pinKey('${k}')`);
-  await A.until(() => !A.ev('locked')); assert.ok(!A.w.document.documentElement.classList.contains('locked')); ok('right PIN unlocks');
-
-  // reload with lock -> lock first, no content, no network needed
-  const snap = A.store(); const R = device(snap);
-  assert.ok(R.w.document.documentElement.classList.contains('locked-boot') || R.ev('locked')); assert.ok(!R.w.document.body.classList.contains('app-on')); ok('cold start with lock: PIN screen first, app not rendered');
-  for (const k of '4821') await R.ev(`pinKey('${k}')`);
-  await R.until(() => R.w.document.body.classList.contains('app-on')); assert.ok(R.ev('state.xp') >= 900); ok('unlock -> app opens from local data instantly');
-
-  // ---- cold start without lock opens instantly even if the server is DOWN
-  const noLock = Object.assign({}, snap); delete noLock.olc2_lock;
-  const realBase = BASE; BASE = 'http://127.0.0.1:1';
-  const O = device(noLock); await O.until(() => O.w.document.body.classList.contains('app-on'), 1500); assert.ok(O.ev('state.xp') >= 900); ok('opens instantly from this device even with the server unreachable');
-  BASE = realBase;
-
-  // ---- fresh/blank guard: cleared cache must not wipe cloud data
-  const wiped = Object.assign({}, C.store()); delete wiped.olc2_lock; Object.keys(wiped).filter(k => /^olc2_(state|meta|bk)_/.test(k)).forEach(k => delete wiped[k]);
-  const W = device(wiped); await W.until(() => W.w.document.body.classList.contains('app-on'));
-  await W.until(() => W.ev('state.xp') >= 900, 10000); ok('cleared browser cache: cloud data comes back, blank state never overwrites it');
-
-  // ---- rollover must not mark data as changed (it used to upload every 30 s)
-  A.ev('persistLocal(); meta.dirty = false;'); A.ev('rollover(); rollover(); rollover();'); await sleep(500);
-  assert.equal(A.ev('meta.dirty'), false); ok('background tick no longer marks data changed / uploads');
-
-
-  // ---- shared catalog: ranks / medals / badges / divisions added in one account show in every account
-  const mk = async (u, pw) => { const D = device(); await D.until(() => D.$('authGate').innerHTML.includes('CREATE ACCOUNT')); fill(D, { cr_user: u, cr_pass: pw, cr_pass2: pw }); D.submit('f_create'); await D.until(() => D.$('olcModal').innerHTML.includes('RECOVERY CODE')); D.$('recSaved').checked = true; D.$('recSaved').dispatchEvent(new D.w.Event('change')); D.$('recGo').click(); await D.until(() => D.w.document.body.classList.contains('app-on'), 12000); return D; };
-  const P1 = await mk('Ca111111', 'catalog-pw-1'), P2 = await mk('Cb222222', 'catalog-pw-2');
-  P1.ev(`state.customMedals.push({id:'medal_shared1',name:'IRON WILL',requirements:'30 days',connection:'',connectionKey:'manual',target:30,current:5,colors:['#111111','#222222','#333333'],why:'discipline',timesEarned:2,createdDate:'2026-10-01'}); state.customBadges.push({id:'badge_shared1',name:'EARLY BIRD',requirements:'wake early',connectionKey:'manual',target:1,current:0,colors:['#111111','#222222','#333333'],timesEarned:0}); state.divisions.push({id:'div_shared1',division:'ALPHA',name:'Alpha Division',colors:{primary:'#ff5500',secondary:'#aa3300',accent:'#33ccff'},systemTheme:'auto',books:[],reasonLog:[],createdAt:1}); state.activeDivisionId='div_shared1'; state.rankOverrides=RANKS.map((r,i)=>i*111); saveState();`);
-  await P1.ev('syncNow({manual:true})'); await P1.until(() => P1.ev('meta.dirty') === false); await P1.ev('catSync()'); await sleep(600);
-  await P2.ev('syncNow({manual:true})'); await P2.until(() => P2.ev("state.customMedals.some(m=>m.id==='medal_shared1')"), 10000);
-  assert.ok(P2.ev("state.customBadges.some(b=>b.id==='badge_shared1')") && P2.ev("state.divisions.some(d=>d.id==='div_shared1')")); assert.equal(P2.ev('rankXP(3)'), 333); ok('catalog: medal, badge, division and ranks added in account 1 appear in account 2');
-  assert.equal(P2.ev("state.customMedals.find(m=>m.id==='medal_shared1').current"), 0); assert.equal(P2.ev("state.customMedals.find(m=>m.id==='medal_shared1').timesEarned"), 0); assert.equal(P2.ev('state.activeDivisionId'), null); ok('catalog: progress, times earned and division ON/OFF stay per account');
-  P2.ev(`state.customMedals.find(m=>m.id==='medal_shared1').name='IRON WILL II'; saveState();`); await P2.ev('syncNow({manual:true})'); await P2.until(() => P2.ev('meta.dirty') === false); await P2.ev('catSync()'); await sleep(600);
-  await P1.ev('catSync()'); await P1.until(() => P1.ev("state.customMedals.find(m=>m.id==='medal_shared1').name") === 'IRON WILL II', 8000); assert.equal(P1.ev("state.customMedals.find(m=>m.id==='medal_shared1').current"), 5); ok('catalog: an edit in account 2 reaches account 1 (own progress kept)');
-  P2.ev(`state.customBadges=state.customBadges.filter(b=>b.id!=='badge_shared1'); saveState();`); await P2.ev('catSync()'); await sleep(600); await P1.ev('catSync()');
-  await P1.until(() => !P1.ev("state.customBadges.some(b=>b.id==='badge_shared1')"), 8000); ok('catalog: removing an item in one account removes it everywhere');
-  assert.equal(P1.err.length + P2.err.length, 0, [P1.err, P2.err].join('|'));
-  assert.equal(A.err.length + B.err.length + C.err.length, 0, [A.err, B.err, C.err].join('|'));
-  console.log('\nALL FRONTEND TESTS PASSED (' + n + ')'); process.exit(0);
-})().catch(e => { console.error('\nFRONTEND TEST FAILED:', e); process.exit(1); });
+  console.log('\nLEGACY (v9 backend) SYNC TESTS PASSED (' + n + ')'); process.exit(0);
+})().catch(e => { console.error('\nLEGACY TEST FAILED:', e); process.exit(1); });
