@@ -1,0 +1,22 @@
+{
+  "name": "olc-backend",
+  "version": "3.0.0",
+  "description": "Operation Life Change - accounts, sessions, field-by-field merge sync, live updates and file storage (PostgreSQL)",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/merge.js && node test/run.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^24.0.0",
+    "pg-mem": "^3.0.5"
+  }
+}
