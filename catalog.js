@@ -11,7 +11,7 @@ const CAT_SHARED = {
 };
 const CAT_LIST = { medal: 'customMedals', badge: 'customBadges', division: 'divisions' };
 const RANK_ID = 'ranks_main';
-let catBusy = false, catAgain = false;
+let catBusy = false, catAgain = false, catHits = [];
 const catKey = () => 'olc2_cat_' + activeAccountId;
 function catStr(s){ let h = 5381; for(let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return String(h) + ':' + s.length; }
 function catPick(kind, it){ const o = {}; CAT_SHARED[kind].forEach(k => { if(it && it[k] !== undefined && it[k] !== null) o[k] = it[k]; }); return o; }
@@ -87,6 +87,7 @@ async function catSync(){
     }
     LS.set(catKey(), store);
     if(changed){
+      const nowT = Date.now(); catHits = catHits.filter(t => nowT - t < 60000); catHits.push(nowT); if(catHits.length > 4){ LS.set(catKey(), store); return; }   // safety: never loop
       try{ if(typeof applyDivisionTheme === 'function') applyDivisionTheme(); }catch(e){}
       saveState();
       if(typeof refreshUI === 'function'){ if(typeof uiBusy === 'function' && uiBusy()) pendingRender = true; else refreshUI(); }

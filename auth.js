@@ -190,8 +190,8 @@ function persistLocal(){
 function saveState(){
   if(!activeAccountId || !state) return;
   meta.dirty = true; meta.seq++;
-  clearTimeout(localTimer); localTimer = setTimeout(persistLocal, 350);
-  schedulePush(1200);
+  clearTimeout(localTimer); localTimer = setTimeout(persistLocal, 250);
+  schedulePush(650);
   setSync(navigator.onLine === false ? 'offline' : 'pending');
 }
 function loadLocalFor(id){
@@ -209,7 +209,15 @@ function loadLocalFor(id){
    - live push from the server: other devices hear about a change within a second or two
    ============================================================ */
 let syncInfo = { status: 'idle', at: null, msg: '' };
+let syncShowTimer = null;
 function setSync(status, msg){
+  // fast syncs jump straight to green; 'Syncing…' only appears if an upload really takes a moment
+  clearTimeout(syncShowTimer);
+  if(status === 'syncing' && syncInfo.status !== 'syncing'){ const prev = syncInfo.status; syncShowTimer = setTimeout(() => setSyncNow('syncing', msg), 450); return; }
+  setSyncNow(status, msg);
+}
+function setSyncNow(status, msg){
+  if(status === 'ok' && syncInfo.status === 'ok'){ syncInfo.at = Date.now(); return; }       // background check, nothing changed: stay quietly green
   syncInfo = { status, at: status === 'ok' ? Date.now() : syncInfo.at, msg: msg || '' };
   const pill = $('syncPill'), txt = $('syncPillTxt');
   if(pill){
@@ -227,16 +235,22 @@ function updateSyncDetail(){
     error:'Could not reach the server — your data is safe on this device and will retry automatically.', auth:'Session expired — sign in again (your data on this device is safe).', idle:'Not synced yet.' };
   el.textContent = (m[syncInfo.status] || '') + (syncInfo.msg ? ' — ' + syncInfo.msg : '');
 }
+let noGzip = false;
 async function api(method, path, body, token, opts){
   opts = opts || {};
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), opts.timeout || 20000);
   try{
-    const res = await fetch(API_BASE_URL + path, {
+    let payload = body ? JSON.stringify(body) : undefined, enc = null;
+    if(payload && opts.gzip && !noGzip && payload.length > 20000 && typeof CompressionStream !== 'undefined'){
+      try{ payload = await new Response(new Blob([payload]).stream().pipeThrough(new CompressionStream('gzip'))).blob(); enc = 'gzip'; }catch(e){ payload = JSON.stringify(body); }
+    }
+    let res = await fetch(API_BASE_URL + path, {
       method, signal: ctrl.signal,
-      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
-      body: body ? JSON.stringify(body) : undefined,
+      headers: Object.assign({ 'Content-Type': 'application/json' }, enc ? { 'Content-Encoding': enc } : {}, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: payload,
     });
+    if(enc && (res.status === 400 || res.status === 415)){ noGzip = true; res = await fetch(API_BASE_URL + path, { method, signal: ctrl.signal, headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}), body: JSON.stringify(body) }); }
     let data = {}; try{ data = await res.json(); }catch(e){}
     return { ok: res.ok, status: res.status, data };
   } finally { clearTimeout(t); }
@@ -317,7 +331,7 @@ async function syncNow(opts){
     if(legacyServer){ const okL = await legacySync(acc, opts); if(okL){ lastSyncOk = Date.now(); backoff = 0; LS.set(metaKey(id), meta); setSync(meta.dirty ? 'pending' : 'ok'); if(meta.dirty) schedulePush(600); } return; }
     let r, posted = false;
     if(meta.fresh && !opts.force) r = await api('GET', '/api/sync?v=0', null, acc.token, { timeout: 45000 });
-    else if(meta.dirty || opts.force || !meta.v){ posted = true; r = await api('POST', '/api/sync', { state, device: deviceId }, acc.token, { timeout: 70000 }); }
+    else if(meta.dirty || opts.force || !meta.v){ posted = true; r = await api('POST', '/api/sync', { state, device: deviceId }, acc.token, { timeout: 70000, gzip: true }); }
     else r = await api('GET', '/api/sync?v=' + meta.v, null, acc.token, { timeout: 30000 });
     if(activeAccountId !== id) return;
     noteClock(r, t0);
@@ -434,6 +448,7 @@ function startSyncLoops(){
     const idle = Date.now() - lastSyncOk;
     if(meta.dirty || !liveUp || idle > 100000) syncNow();
   }, 15000);
+  setInterval(() => { if(legacyServer && !document.hidden && state && !locked) syncNow(); }, 6000);      // old backend has no live push: a quiet check every 6 s (the pill stays green unless something changed)
   window.addEventListener('online', () => { restartLive(); syncNow({ manual: true }); });
   window.addEventListener('offline', () => setSync('offline'));
   document.addEventListener('visibilitychange', () => {

@@ -13,7 +13,7 @@ w.fetch = () => Promise.reject(new Error('offline')); w.matchMedia = () => ({ ma
 w.HTMLElement.prototype.scrollIntoView = () => {}; w.scrollTo = () => {}; w.crypto = require('crypto').webcrypto; w.TextEncoder = TextEncoder; w.AbortController = AbortController;
 w.indexedDB = indexedDB; w.IDBKeyRange = IDBKeyRange; w.Blob = Blob; w.File = File; let ou = 0; w.URL.createObjectURL = () => 'blob:mock/' + (++ou); w.createImageBitmap = undefined; w.TextDecoder = TextDecoder; w.CustomEvent = CustomEvent;
 const ctx = dom.getInternalVMContext(); const errs = []; w.addEventListener('error', e => errs.push(e.message));
-for (const f of ['merge.js', 'app.js', 'blobs.js', 'v10.js', 'auth.js']) new vm.Script(fs.readFileSync(FE + '/' + f, 'utf8'), { filename: f }).runInContext(ctx);
+for (const f of ['merge.js', 'app.js', 'blobs.js', 'v10.js', 'v11.js', 'catalog.js', 'auth.js']) new vm.Script(fs.readFileSync(FE + '/' + f, 'utf8'), { filename: f }).runInContext(ctx);
 const ev = s => vm.runInContext(s, ctx), $ = id => w.document.getElementById(id), main = () => $('mainContent').innerHTML;
 let n = 0; const ok = t => console.log('  ✓', t, ++n);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -73,6 +73,34 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // sidebar arrange
   ev('toggleSidebarEdit()'); ev("sideMove('divisions',1)"); ev("sideHide('streaks')"); ev('toggleSidebarEdit()');
   assert.ok(w.document.querySelector('[data-sec="streaks"]').classList.contains('is-hidden')); ev("toggleNavGroup('operations')"); assert.ok(w.document.querySelector('.navgroup[data-g="operations"]').classList.contains('collapsed')); ok('sidebar: hide / move / collapse sections');
+
+  // ---- v11: every day is its own page
+  const Y = ev('yestOf(todayStr())'), T0 = ev('todayStr()');
+  ev(`state.dailyLogs['${Y}'] = undefined; delete state.dailyLogs['${Y}']; state.goals=[{id:'g_a',label:'Alpha',xp:10},{id:'g_b',label:'Beta',xp:20},{id:'g_c',label:'Gamma',xp:5}]; ensureDay('${Y}'); setGoalStatus('${Y}','g_a','full'); setGoalStatus('${Y}','g_b','full'); setGoalStatus('${Y}','g_c','full');`);
+  assert.equal(ev(`goalsForDate('${Y}').length`), 3); const yXP = ev(`dayGoalXP('${Y}')`); assert.equal(yXP, 35);
+  ev(`delete state.dailyLogs['${T0}']; ensureDay('${T0}'); setGoalStatus('${T0}','g_a','full'); setGoalStatus('${T0}','g_b','half');`);
+  w.prompt = (m, d) => (/XP/.test(m) ? '50' : 'Beta+'); ev("editGoal('g_b')");              // today: change name + xp
+  ev("deleteGoal('g_c')");                                                                       // today: delete Gamma
+  $('newGoalLabel') || ev("go('daily')"); $('newGoalLabel').value = 'Delta'; $('newGoalXP').value = '8'; $('newGoalWhen').value = 'today'; ev('addGoal()');   // today: add Delta
+  assert.equal(ev(`goalsForDate('${Y}').map(g=>g.label+g.xp).join()`), 'Alpha10,Beta20,Gamma5'); assert.equal(ev(`dayGoalXP('${Y}')`), 35); ok("yesterday's page is untouched by today's add / delete / edit");
+  assert.equal(ev(`goalsForDate('${T0}').map(g=>g.label+g.xp).join()`), 'Alpha10,Beta+50,Delta8'); ok("today's page shows the changes (Beta+ 50 XP, Gamma gone, Delta added)");
+  assert.equal(ev(`dayGoalXP('${T0}')`), 10 + 25); ok("today's XP follows the new values (half of 50 + Alpha)");
+  ev("delete state.dailyLogs[todayStr(new Date(Date.now()+86400000))]"); const nextDay = ev('tomorrowOf(todayStr())'); ev(`ensureDay('${nextDay}')`);
+  assert.equal(ev(`goalsForDate('${nextDay}').map(g=>g.label).join()`), 'Alpha,Beta+,Delta'); ev(`delete state.dailyLogs['${nextDay}']`); ok('the next day starts from the updated list');
+  ev(`go('archives')`); assert.ok(main().includes('<th>XP</th>')); ev(`openDayDetail('${Y}')`); assert.ok($('dayDetailBody').innerHTML.includes('Gamma') && $('dayDetailBody').innerHTML.includes('DAY PAGE')); ok('History: the day page shows that day\'s own goals and navigation');
+  ev(`dayNav(1)`); ev('closeDayDetail()');
+
+  // ---- v11: tracker entries are addressed by id (positions change when devices merge)
+  ev("state.trackerLogs.study=[{id:'s1',date:'2026-10-01',hours:2,subject:'Math'},{id:'s2',date:'2026-10-02',hours:3,subject:'Physics'}]; state.trackerLogs.sleep=[{id:'z1',date:'2026-10-02',bed:'23:30',wake:'06:30'}]; go('trackers')");
+  assert.ok(main().includes("deleteTrackerEntry('study','s2')") && main().includes('7.0 h')); ok('tracker: buttons use ids, sleep shows hours slept, summary cards render');
+  ev("state.trackerLogs.study.unshift({id:'s0',date:'2026-09-01',hours:1,subject:'Chem'})");   // order changes (like after a merge): s2 moves from index 1 to 2
+  ev("deleteTrackerEntry('study','s2')"); assert.deepEqual(ev("state.trackerLogs.study.map(e=>e.id).join()"), 's0,s1'); ok('tracker: deleting by id removes the right entry even if positions moved');
+
+  // ---- v11: dashboard
+  ev("state.trackerLogs.study.push({id:'s9',date:todayStr(),hours:2.5,subject:'English'}); state.trackerLogs.sleep.push({id:'z9',date:todayStr(),bed:'23:00',wake:'06:30'}); state.trackerLogs.exercise.push({id:'e9',date:todayStr(),type:'proper',name:'Run',durationMin:30}); go('dashboard')");
+  const dh = main(); assert.ok(!dh.includes('hit a data problem')); assert.ok(dh.includes('<svg') && dh.includes('class="donut"') && dh.includes('TARGETS') && dh.includes('CONSISTENCY MAP') && dh.includes('PINNED NOTES')); ok('dashboard renders: KPIs, line/bar charts, pie charts, targets, heat-map');
+  ev("togglePin('study')"); assert.ok(main().includes('PINNED') && ev('state.dash.pins.study') === 1); ev("setDashTarget('studyWeek', 30)"); assert.equal(ev('state.dash.targets.studyWeek'), 30);
+  $('dashNoteTxt').value = 'Read 20 pages'; ev('addDashNote()'); assert.ok(main().includes('Read 20 pages')); ev("setDashRange(7)"); ev("setDashRange(90)"); assert.ok(!main().includes('hit a data problem')); ok('dashboard: pin, target, pinned note and range switch work');
   // sync metadata present
   ev('persistLocal()'); assert.ok(ev("Object.keys(state._m.s).length")>3); ok('every change is stamped for merging');
   assert.equal(errs.length, 0, errs.join('|'));

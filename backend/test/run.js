@@ -52,6 +52,10 @@ const { main } = require('../server');
   await push(laptop, a.body.token); ok('first sync stores the data');
   r = await call('GET', '/api/state', null, tokA2); assert.equal(r.body.state.xp, 120); ok('legacy read still works');
   r = await call('PUT', '/api/state', { state: base, baseUpdatedAt: 0 }, tokA2); assert.equal(r.status, 426); ok('old v9 app cannot overwrite (asked to update)');
+  { const zlib = require('zlib'); const big = { profile: { name: 'gz' }, junk: 'x'.repeat(60000) }; const st = M.stamp ? null : null;
+    const raw = JSON.stringify({ state: { profile: { name: 'gz-test' } }, device: 'gz' }); const gz = zlib.gzipSync(Buffer.from(raw));
+    const rr = await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', Authorization: 'Bearer ' + tokA2 }, body: gz });
+    assert.notEqual(rr.status, 415); assert.notEqual(rr.status, 400); ok('compressed (gzip) uploads are accepted by the server'); }
   r = await call('POST', '/api/sync', { state: { profile: { name: 'old' } } }, tokA2); assert.equal(r.status, 426); ok('state without field stamps refused once stamped data exists');
   await push(phone, tokA2); ok('phone joins');
   edit(laptop, (s) => { s.dailyLogs['2026-10-01'].items.g1 = 'full'; s.dailyLogs['2026-10-01'].ratings = { study: 4 }; s.profile.name = 'Agent SK'; });

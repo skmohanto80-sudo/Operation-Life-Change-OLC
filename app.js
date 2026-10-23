@@ -92,6 +92,7 @@ const DEFAULT_STATE = {
   activeDivisionId:null,
   books:[], // OLC Book library: [{id,title,cover,ratio,pages:[{id,type,img,text,title}]}]
   journal:{ title:'My OLC Journal', subtitle:'', front:{ title:'', subtitle:'', img:null, color:'' }, back:{ title:'The End', subtitle:'', img:null, color:'' }, pages:[] },
+  dash:{ range:30, pins:{}, targets:{ studyWeek:20, sleepHrs:7.5, water:0, xpMonth:1000, dss:80, exerciseWeek:4, screenMax:0, weight:0 }, notes:[] }, // dashboard: pinned stats, targets, pinned notes
   rankOverrides:null, // null = use built-in XP thresholds; else array of 14 custom XP numbers
   customImages:{ radhaKrishna:null }, // null = use bundled default image
   ruleBookCustom:'',
@@ -187,8 +188,10 @@ function ensureDay(date){
       planner:{ morning:'', afternoon:'', night:'' },
       eod:{ well:'', failed:'', learned:'', tomorrow:'' },
     };
+    state.dailyLogs[date].goals = templateGoalsFor(date);        // this day's own goal list — later edits never touch other days
   }
   const d = state.dailyLogs[date];
+  if(!Array.isArray(d.goals)) d.goals = templateGoalsFor(date);   // older days are frozen the first time they are opened
   if(!d.ratings) d.ratings = { study:0, exercise:0, spiritual:0, mood:0 };
   if(!d.screen) d.screen = { totalMin:0, devices:[], awarded:false, xpApplied:0 };
   if(d.screen.xpApplied===undefined) d.screen.xpApplied = 0;
@@ -239,9 +242,16 @@ function streakUncheck(key, date){
   if(s.lastDate !== date) return;
   s.count = s._pc; s.lastDate = s._pd;
 }
-function goalsForDate(date){
-  return state.goals.filter(g => !g.effectiveFrom || g.effectiveFrom <= date);
+/* template = the list new days start from. Each day then keeps its OWN copy (day.goals): add / change / delete today and only today changes. */
+function templateGoalsFor(date){
+  return (state.goals || []).filter(g => !g.effectiveFrom || g.effectiveFrom <= date).map(g => ({ id:g.id, label:g.label, xp:g.xp }));
 }
+function goalsForDate(date){
+  const day = state.dailyLogs[date];
+  if(day && Array.isArray(day.goals)) return day.goals;
+  return templateGoalsFor(date);                                  // day not created yet: preview only, nothing is stored
+}
+function dayGoalXP(date){ const day = state.dailyLogs[date]; if(!day) return 0; return goalsForDate(date).reduce((a,g)=>a+goalXPEffect(g, goalStatus(day,g.id)),0); }
 function recomputeHabitStreak(date){
   const day = ensureDay(date);
   const active = goalsForDate(date);
@@ -264,7 +274,7 @@ function goalXPEffect(goal, status){
 }
 function setGoalStatus(date, goalId, status){
   const day = ensureDay(date);
-  const goal = state.goals.find(g=>g.id===goalId); if(!goal) return;
+  const goal = day.goals.find(g=>g.id===goalId); if(!goal) return;
   const old = goalStatus(day, goalId);
   const next = (old===status) ? null : status; // clicking the active state again clears it
   addXP(goalXPEffect(goal, next) - goalXPEffect(goal, old));
@@ -277,29 +287,38 @@ function addGoal(){
   const xp = Number(document.getElementById('newGoalXP').value)||10;
   const when = document.getElementById('newGoalWhen').value; // 'today' | 'tomorrow'
   if(!label) return;
-  // Every new goal is pinned to the date it was actually created (or tomorrow, if
-  // scheduled ahead) — never left open-ended — so it can never leak backward into
-  // days before it existed, in History, Day Detail, or DSS.
-  const effectiveFrom = when==='tomorrow' ? tomorrowOf(todayStr()) : todayStr();
-  state.goals.push({ id: uid('g'), label, xp, effectiveFrom });
+  const t = todayStr(), id = uid('g');
+  if(when==='tomorrow'){ state.goals.push({ id, label, xp, effectiveFrom: tomorrowOf(t) }); }   // appears on tomorrow's page when that day starts
+  else { state.goals.push({ id, label, xp, effectiveFrom: t }); ensureDay(t).goals.push({ id, label, xp }); }   // today's page + every day after it
   saveState(); renderSection();
 }
-function editGoal(id){
-  const g = state.goals.find(x=>x.id===id); if(!g) return;
-  const newLabel = prompt('Goal name:', g.label);
+function editGoal(id, date){
+  date = date || todayStr();
+  const day = ensureDay(date), g = day.goals.find(x=>x.id===id);
+  if(!g){ const tpl = state.goals.find(x=>x.id===id); if(!tpl) return;            // a goal scheduled for a later day
+    const nl = prompt('Goal name:', tpl.label); if(nl===null) return; const nx = prompt('XP value (full completion):', tpl.xp); if(nx===null) return;
+    tpl.label = nl.trim()||tpl.label; tpl.xp = Number(nx)||tpl.xp; saveState(); renderSection(); return; }
+  const newLabel = prompt('Goal name (changes ' + (date===todayStr() ? 'today and the days after' : 'only ' + date) + ' — earlier days stay as they were):', g.label);
   if(newLabel===null) return;
   const newXp = prompt('XP value (full completion):', g.xp);
   if(newXp===null) return;
-  const newFrom = prompt('Active from date (YYYY-MM-DD). Leave this blank ONLY if this goal has genuinely always applied — otherwise set the day it actually started, so past History stays accurate:', g.effectiveFrom||'');
-  if(newFrom===null) return;
+  const st = goalStatus(day, id), before = goalXPEffect(g, st);
   g.label = newLabel.trim()||g.label;
   g.xp = Number(newXp)||g.xp;
-  g.effectiveFrom = newFrom.trim() || null;
+  if(st) addXP(goalXPEffect(g, st) - before);                     // today's score follows the new XP value
+  if(date===todayStr()){ const tpl = state.goals.find(x=>x.id===id); if(tpl){ tpl.label = g.label; tpl.xp = g.xp; } }
   saveState(); renderSection();
 }
-function deleteGoal(id){
-  if(!confirm('Remove this goal from your Daily Goals list?')) return;
-  state.goals = state.goals.filter(g=>g.id!==id);
+function deleteGoal(id, date){
+  date = date || todayStr();
+  if(!confirm('Remove this goal from ' + (date===todayStr() ? 'today and the days after' : date) + '? Earlier days keep it in their history.')) return;
+  const day = ensureDay(date), g = day.goals.find(x=>x.id===id);
+  if(!g){ state.goals = state.goals.filter(x=>x.id!==id); saveState(); renderSection(); return; }
+  const st = goalStatus(day, id); if(st) addXP(-goalXPEffect(g, st));
+  delete day.items[id];
+  day.goals = day.goals.filter(x=>x.id!==id);
+  if(date===todayStr()) state.goals = state.goals.filter(x=>x.id!==id);
+  recomputeHabitStreak(date);
   saveState(); renderSection();
 }
 function goalRowHTML(date, g, compact){
@@ -312,7 +331,7 @@ function goalRowHTML(date, g, compact){
     <div class="txt">${esc(g.label)}</div>
     <div class="goal-actions">${btn('full','Full','full')}${btn('half','Half','half')}${btn('fail','Fail','fail')}</div>
     <div class="xp">${effTxt}</div>
-    ${compact ? '' : `<button class="btn ghost sm" onclick="editGoal('${g.id}')" title="Edit">✎</button><button class="btn ghost sm" onclick="deleteGoal('${g.id}')" title="Delete">🗑</button>`}
+    ${compact ? '' : `<button class="btn ghost sm" onclick="editGoal('${g.id}','${date}')" title="Edit">✎</button><button class="btn ghost sm" onclick="deleteGoal('${g.id}','${date}')" title="Delete">🗑</button>`}
   </div>`;
 }
 
@@ -1308,11 +1327,11 @@ function secTrackers(){
   const screen = day.screen;
   const screenPct = clamp(screen.totalMin/state.settings.screenLimit*100,0,100);
 
-  const weightLog = sortedDesc(state.trackerLogs.weight).slice(0,8);
-  const heightLog = sortedDesc(state.trackerLogs.height).slice(0,8);
-  const exLog = sortedDesc(state.trackerLogs.exercise).slice(0,8);
-  const studyLog = sortedDesc(state.trackerLogs.study).slice(0,8);
-  const sleepLog = sortedDesc(state.trackerLogs.sleep).slice(0,8);
+  const weightLog = sortedDesc(state.trackerLogs.weight).slice(0,trkLim());
+  const heightLog = sortedDesc(state.trackerLogs.height).slice(0,trkLim());
+  const exLog = sortedDesc(state.trackerLogs.exercise).slice(0,trkLim());
+  const studyLog = sortedDesc(state.trackerLogs.study).slice(0,trkLim());
+  const sleepLog = sortedDesc(state.trackerLogs.sleep).slice(0,trkLim());
 
   const wEdit = editingTracker.name==='weight' ? state.trackerLogs.weight[editingTracker.index] : null;
   const hEdit = editingTracker.name==='height' ? state.trackerLogs.height[editingTracker.index] : null;
@@ -1377,8 +1396,8 @@ function secTrackers(){
       </div>
       <button class="btn sm" onclick="saveSleepLog()">${slEdit?'Update Entry':'Log Sleep'}</button>
       ${slEdit?`<button class="btn ghost sm" onclick="cancelEdit()">Cancel</button>`:''}
-      <table style="margin-top:12px;"><tr><th>Date</th><th>Bed</th><th>Wake</th><th></th></tr>
-      ${sleepLog.length? sleepLog.map(e=>`<tr><td>${e.date}</td><td>${e.bed}</td><td>${e.wake}</td><td><button class="btn ghost sm" onclick="startEditEntry('sleep',${e._i})">✎</button> <button class="btn ghost sm" onclick="deleteTrackerEntry('sleep',${e._i})">🗑</button></td></tr>`).join(''):'<tr><td colspan="4" class="empty">No entries yet</td></tr>'}
+      <table style="margin-top:12px;"><tr><th>Date</th><th>Bed</th><th>Wake</th><th>Slept</th><th></th></tr>
+      ${sleepLog.length? sleepLog.map(e=>`<tr><td>${e.date}</td><td>${e.bed}</td><td>${e.wake}</td><td>${sleepHours(e).toFixed(1)} h</td><td><button class="btn ghost sm" onclick="startEditEntry('sleep',${e._i})">✎</button> <button class="btn ghost sm" onclick="deleteTrackerEntry('sleep',${e._i})">🗑</button></td></tr>`).join(''):'<tr><td colspan="4" class="empty">No entries yet</td></tr>'}
       </table>
     </div>
 
@@ -1452,7 +1471,9 @@ function secTrackers(){
   `;
 }
 
-let exerciseTypeSel = 'proper';
+let exerciseTypeSel = 'proper', trkAll = false;
+function trkLim(){ return trkAll ? 100000 : 10; }
+function sleepHours(e){ if(!e||!e.bed||!e.wake) return 0; const [b1,b2]=e.bed.split(':').map(Number), [w1,w2]=e.wake.split(':').map(Number); let m=(w1*60+w2)-(b1*60+b2); if(m<=0) m+=1440; return m/60; }
 
 function addWater(l){ const day=ensureDay(todayStr()); day.waterL = Math.round((day.waterL+l)*100)/100; saveState(); renderSection(); }
 function resetWater(){ const day=ensureDay(todayStr()); day.waterL=0; saveState(); renderSection(); }
@@ -1856,7 +1877,7 @@ function secArchives(){
   <div class="panel">
     <h3><span class="ic">🗄</span>DAILY REPORTS <span style="font-weight:400; color:var(--dim); font-size:11px;">(last 2 months · click a row for full detail)</span></h3>
     <table>
-      <tr><th>Date</th><th>DSS</th><th>Goals</th><th>Woke On Time</th><th>Water</th><th>Screen</th><th>EOD Logged</th></tr>
+      <tr><th>Date</th><th>DSS</th><th>Goals</th><th>XP</th><th>Woke On Time</th><th>Water</th><th>Screen</th><th>EOD Logged</th></tr>
       ${dates.length ? dates.slice(0,62).map(d=>{
         const day = state.dailyLogs[d];
         const activeGoals = goalsForDate(d);
@@ -1865,8 +1886,8 @@ function secArchives(){
         const waterL = day.waterL||0;
         const scrMin = (day.screen&&day.screen.totalMin)||0;
         const scrOver = scrMin>0 && scrMin>state.settings.screenLimit;
-        return `<tr id="hrow-${d}" style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${activeGoals.length}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${waterL?waterL+'L':'—'}</td><td style="${scrMin?(scrOver?'color:var(--danger);':'color:var(--green);'):''}">${scrMin?scrMin+'m':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
-      }).join('') : '<tr><td colspan="7" class="empty">No history yet — complete your first day</td></tr>'}
+        return `<tr id="hrow-${d}" style="cursor:pointer;" onclick="openDayDetail('${d}')"><td>${d}</td><td>${getDSS(d)}</td><td>${done}/${activeGoals.length}</td><td>${dayGoalXP(d)>0?'+':''}${dayGoalXP(d)}</td><td>${day.wokeOnTime?'✓':'—'}</td><td>${waterL?waterL+'L':'—'}</td><td style="${scrMin?(scrOver?'color:var(--danger);':'color:var(--green);'):''}">${scrMin?scrMin+'m':'—'}</td><td>${hasEod?'✓':'—'}</td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">No history yet — complete your first day</td></tr>'}
     </table>
   </div>
 

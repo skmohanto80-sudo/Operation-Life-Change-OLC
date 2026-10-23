@@ -22,7 +22,7 @@ function device(storage) {
   w.HTMLElement.prototype.scrollIntoView = () => {}; w.scrollTo = () => {};
   const ctx = dom.getInternalVMContext();
   const err = []; w.addEventListener('error', e => err.push(e.message));
-  for (const [src, fn] of [[mergeJs, 'merge.js'], [appJs, 'app.js'], [blobsJs, 'blobs.js'], [v10Js, 'v10.js'], [rd('catalog.js'), 'catalog.js'], [authJs, 'auth.js']]) new vm.Script(src, { filename: fn }).runInContext(ctx);
+  for (const [src, fn] of [[mergeJs, 'merge.js'], [appJs, 'app.js'], [blobsJs, 'blobs.js'], [v10Js, 'v10.js'], [rd('v11.js'), 'v11.js'], [rd('catalog.js'), 'catalog.js'], [authJs, 'auth.js']]) new vm.Script(src, { filename: fn }).runInContext(ctx);
   const d = { w, ctx, err, ev: (s) => vm.runInContext(s, ctx), $: (id) => w.document.getElementById(id),
     store: () => { const o = {}; for (let i = 0; i < w.localStorage.length; i++) { const k = w.localStorage.key(i); o[k] = w.localStorage.getItem(k); } return o; },
     until: async (f, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { try { if (f()) return; } catch (e) {} await sleep(40); } throw new Error('timeout waiting: ' + f); },
