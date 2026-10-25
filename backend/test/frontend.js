@@ -15,7 +15,7 @@ function device(storage) {
   const dom = new JSDOM(html, { url: 'https://olc.test/', runScripts: 'dangerously', pretendToBeVisual: true });
   const w = dom.window;
   if (storage) for (const [k, v] of Object.entries(storage)) w.localStorage.setItem(k, v);
-  w.fetch = (u, o) => { if (o && o.method === 'POST' && /\/api\/sync/.test(u)) puts++; return fetch(String(u).replace('https://operation-life-change-olc.onrender.com', BASE), o); };
+  w.fetch = (u, o) => { if (o && o.method === 'POST' && /\/api\/sync/.test(u)) puts++; return fetch(String(u).replace('https://operation-life-change-olc-3.onrender.com', BASE), o); };
   w.AbortController = AbortController; w.crypto = require('crypto').webcrypto; w.TextEncoder = TextEncoder;
   w.indexedDB = indexedDB; w.IDBKeyRange = IDBKeyRange; w.Blob = Blob; w.File = File; w.CustomEvent = w.CustomEvent || CustomEvent; let ou = 0; w.URL.createObjectURL = () => 'blob:mock/' + (++ou); w.createImageBitmap = undefined; w.TextDecoder = TextDecoder;
   w.fetch = w.fetch; w.matchMedia = () => ({ matches: false, addEventListener(){} }); w.confirm = () => true; w.alert = () => {};
