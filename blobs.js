@@ -59,7 +59,7 @@ const Blobs = (function(){
       const acc = (typeof loggedAccount === 'function') ? loggedAccount() : null;
       if(!acc || !acc.token || navigator.onLine === false) return null;
       try{
-        const res = await tfetch(API_BASE_URL + '/api/blobs/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + acc.token } }, 60000);
+        const res = await fetch(API_BASE_URL + '/api/blobs/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + acc.token } });
         if(!res.ok) return null;
         const blob = await res.blob();
         await putRec({ id, mime: blob.type || res.headers.get('content-type') || 'application/octet-stream', size: blob.size, blob, up: 1, at: Date.now() });
@@ -97,43 +97,24 @@ const Blobs = (function(){
       getBlob(ref).then((b) => { if(!b) return; if(!urls.has(id)) urls.set(id, URL.createObjectURL(b)); hydrate(document); });
     });
   }
-  /* Uploading pictures / PDFs to the cloud. This NEVER blocks saving or syncing the data itself:
-     - every request has a time limit (a hung upload used to freeze the "Synced" light forever)
-     - one run at a time; a file that fails is retried later with a growing pause, not on every sync
-     - when the cloud file store is full the app says so once, then carries on (files stay safe on this device) */
-  let upRunning = null, quotaToastAt = 0;
-  const tfetch = async (url, opts, ms) => { const c = new AbortController(); const t = setTimeout(() => c.abort(), ms); try{ return await fetch(url, Object.assign({ signal: c.signal }, opts)); } finally { clearTimeout(t); } };
-  function uploadPending(acc){
-    if(upRunning) return upRunning;
-    upRunning = (async () => {
-      acc = acc || (typeof loggedAccount === 'function' ? loggedAccount() : null);
-      if(!acc || !acc.token || (typeof legacyServer !== 'undefined' && legacyServer)) return;
-      const db = await open(); let list = [];
-      if(db){ try{ list = (await req(tx(db, 'readonly').index('up').getAll(0))) || []; }catch(e){} }
-      else list = [...mem.values()].filter((r) => !r.up);
-      const now = Date.now();
-      list = list.filter((r) => !r.retryAt || r.retryAt <= now).sort((a, b) => (a.size || 0) - (b.size || 0));   // small files first
-      if(!list.length) return;
-      let have = [];
-      try{ const r = await api('POST', '/api/blobs/have', { ids: list.map((x) => x.id).slice(0, 200) }, acc.token, { timeout: 20000 }); if(r.ok) have = r.data.have || []; }catch(e){ return; }
-      for(const rec of list){
-        if(have.includes(rec.id)){ rec.up = 1; await putRec(rec); continue; }
-        try{
-          const res = await tfetch(API_BASE_URL + '/api/blobs/' + encodeURIComponent(rec.id) + '?m=' + encodeURIComponent(rec.mime), { method: 'PUT', headers: { Authorization: 'Bearer ' + acc.token, 'Content-Type': 'application/octet-stream' }, body: rec.blob }, 90000);
-          if(res.ok){ rec.up = 1; rec.fails = 0; rec.retryAt = 0; await putRec(rec); }
-          else if(res.status === 413){
-            if(typeof toast === 'function' && Date.now() - quotaToastAt > 3600e3){ quotaToastAt = Date.now(); toast('Cloud file storage is full — your pictures stay safe on this device. Your data still syncs normally.', 7000); }
-            return;
-          } else { rec.fails = (rec.fails || 0) + 1; rec.retryAt = Date.now() + Math.min(30 * 60e3, 30e3 * Math.pow(2, rec.fails)); await putRec(rec); }
-        }catch(e){ rec.fails = (rec.fails || 0) + 1; rec.retryAt = Date.now() + Math.min(30 * 60e3, 30e3 * Math.pow(2, rec.fails)); await putRec(rec); return; }
-      }
-    })().catch(() => {}).finally(() => { upRunning = null; });
-    return upRunning;
-  }
-  async function stats(){
-    const db = await open(); let n = 0, bytes = 0, waiting = 0;
-    if(db){ try{ const all = (await req(tx(db, 'readonly').getAll())) || []; all.forEach((r) => { n++; bytes += r.size || 0; if(!r.up) waiting++; }); }catch(e){} }
-    return { files: n, bytes, waiting };
+  async function uploadPending(acc){
+    acc = acc || (typeof loggedAccount === 'function' ? loggedAccount() : null);
+    if(!acc || !acc.token || (typeof legacyServer !== 'undefined' && legacyServer)) return;
+    const db = await open(); let list = [];
+    if(db){ try{ list = (await req(tx(db, 'readonly').index('up').getAll(0))) || []; }catch(e){} }
+    else list = [...mem.values()].filter((r) => !r.up);
+    if(!list.length) return;
+    // ask the cloud which ones it already has (skip those)
+    let have = [];
+    try{ const r = await api('POST', '/api/blobs/have', { ids: list.map((x) => x.id).slice(0, 200) }, acc.token, { timeout: 20000 }); if(r.ok) have = r.data.have || []; }catch(e){ return; }
+    for(const rec of list){
+      if(have.includes(rec.id)){ rec.up = 1; await putRec(rec); continue; }
+      try{
+        const res = await fetch(API_BASE_URL + '/api/blobs/' + encodeURIComponent(rec.id) + '?m=' + encodeURIComponent(rec.mime), { method: 'PUT', headers: { Authorization: 'Bearer ' + acc.token, 'Content-Type': 'application/octet-stream' }, body: rec.blob });
+        if(res.ok){ rec.up = 1; await putRec(rec); }
+        else if(res.status === 413){ if(typeof toast === 'function') toast('Cloud file storage is full — some files are only on this device.', 6000); return; }
+      }catch(e){ return; }
+    }
   }
   /* shrink a picture before it is stored (keeps the app and the cloud light). keepAlpha=true keeps transparency (logos, flags) */
   async function compress(file, o){
@@ -163,7 +144,7 @@ const Blobs = (function(){
     const start = () => mo.observe(document.body, { childList: true, subtree: true });
     if(document.body) start(); else document.addEventListener('DOMContentLoaded', start);
   }
-  return { put, getBlob, src, url, hydrate, uploadPending, compress, dims, isRef, idOf, stats, busy: () => !!upRunning, PLACE };
+  return { put, getBlob, src, url, hydrate, uploadPending, compress, dims, isRef, idOf, PLACE };
 })();
 /* <img> that loads a stored file (or any normal image path) */
 function bimg(ref, attrs){
