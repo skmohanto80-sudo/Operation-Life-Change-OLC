@@ -44,7 +44,7 @@ for (let round=0; round<300; round++){
   for (let step=0; step<30; step++){
     const d = D[Math.floor(Math.random()*3)];
     const r = Math.random();
-    if (r<0.45){ const k='k'+Math.floor(Math.random()*5); const v=Math.floor(Math.random()*1000)+1; if(d.s.settings[k]===v) continue; /* writing the value a field already has is not a change */ d.s.settings[k]=v; d.commit(); lastWrite['settings/'+k]=[T,v]; }
+    if (r<0.45){ const k='k'+Math.floor(Math.random()*5); const v=Math.floor(Math.random()*1000)+1; d.s.settings[k]=v; d.commit(); lastWrite['settings/'+k]=[T,v]; }
     else if (r<0.65){ const id='r'+Math.floor(Math.random()*6); d.s.goals = d.s.goals||[]; const ex = d.s.goals.find(g=>g.id===id); if(ex){ ex.label='L'+step+d.name; } else d.s.goals.push({id, label:'N'+step, xp:step}); d.commit(); }
     else if (r<0.75){ const id='r'+Math.floor(Math.random()*6); d.s.goals = (d.s.goals||[]).filter(g=>g.id!==id); d.commit(); }
     else { const o = D[Math.floor(Math.random()*3)]; if(o!==d) d.absorb(o); }

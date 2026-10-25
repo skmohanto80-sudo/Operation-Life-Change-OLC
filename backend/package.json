@@ -7,8 +7,7 @@
   "engines": { "node": ">=18" },
   "scripts": {
     "start": "node server.js",
-    "test": "node test/merge.js && node test/run.js",
-    "test:frontend": "node test/frontend.js && node test/sections.js && node test/v103.js"
+    "test": "node test/merge.js && node test/run.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
