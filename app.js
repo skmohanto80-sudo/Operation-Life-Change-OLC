@@ -106,6 +106,12 @@ let state = null;
 let currentSection = 'home';
 let saveTimer = null;
 let editingTracker = { name:null, index:null };
+let trkDate = null;                                   // date chosen for the tracker forms (stays while you backfill several days)
+const trkDay = () => trkDate || todayStr();
+function setTrkDate(v){ trkDate = (v && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null; }
+function trkDateField(id, edit){ const v = edit && edit.date ? edit.date : trkDay(); return `<div class="field"><label class="f">Date</label><input type="date" id="${id}" value="${v}" max="${todayStr()}" onchange="setTrkDate(this.value)"></div>`; }
+function trkPickDate(id){ const el = document.getElementById(id); const v = el && el.value; return (v && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : todayStr(); }
+function trkFmt(d){ try{ return new Date(d+'T00:00:00').toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'}); }catch(e){ return d; } }
 
 function todayStr(d){ const x=d?new Date(d):new Date(); return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0'); }
 function yestOf(dateStr){ const d=new Date(dateStr+'T00:00:00'); d.setDate(d.getDate()-1); return todayStr(d); }
@@ -863,7 +869,7 @@ function rollover(){ const t=todayStr(); const had = !!(state && state.dailyLogs
 ======================================================== */
 function go(sec){
   currentSection = sec;
-  editingTracker = { name:null, index:null };
+  editingTracker = { name:null, index:null }; trkDate = null;
   if(sec==='badges'){ sec = 'medals'; medalTab = 'badges'; currentSection = 'medals'; }
   else if(sec==='medals') medalTab = 'medals';
   if(sec==='rulebook'){ sec = 'books'; currentSection = 'books'; }
@@ -1390,10 +1396,12 @@ function secTrackers(){
   <div class="grid c2" style="margin-top:16px;">
     <div class="panel" id="trk_sleep">
       <h3><span class="ic">🛌</span>SLEEP TRACKER</h3>
-      <div class="grid c2">
+      <div class="grid c3">
+        ${trkDateField('sl_date', slEdit)}
         <div class="field"><label class="f">Bed Time</label><input type="time" id="sl_bed" value="${slEdit?slEdit.bed:''}"></div>
         <div class="field"><label class="f">Wake Time</label><input type="time" id="sl_wake" value="${slEdit?slEdit.wake:''}"></div>
       </div>
+      <div class="stat-label" style="margin:-4px 0 8px;">Date = the day you woke up. Pick an earlier date to add past nights.</div>
       <button class="btn sm" onclick="saveSleepLog()">${slEdit?'Update Entry':'Log Sleep'}</button>
       ${slEdit?`<button class="btn ghost sm" onclick="cancelEdit()">Cancel</button>`:''}
       <table style="margin-top:12px;"><tr><th>Date</th><th>Bed</th><th>Wake</th><th>Slept</th><th></th></tr>
@@ -1405,7 +1413,7 @@ function secTrackers(){
       <h3><span class="ic">⚖️</span>WEIGHT TRACKER</h3>
       <div class="grid c2">
         <div class="field"><label class="f">Weight (kg)</label><input type="number" step="0.1" id="wt_kg" value="${wEdit?wEdit.kg:''}"></div>
-        <div class="field"><label class="f">Date</label><input type="date" id="wt_date" value="${wEdit?wEdit.date:t}"></div>
+        <div class="field"><label class="f">Date</label><input type="date" id="wt_date" value="${wEdit?wEdit.date:trkDay()}" max="${t}" onchange="setTrkDate(this.value)"></div>
       </div>
       <button class="btn sm" onclick="saveWeightLog()">${wEdit?'Update Entry':'Log Weight'}</button>
       ${wEdit?`<button class="btn ghost sm" onclick="cancelEdit()">Cancel</button>`:''}
@@ -1421,7 +1429,7 @@ function secTrackers(){
       <h3><span class="ic">📏</span>HEIGHT TRACKER</h3>
       <div class="grid c2">
         <div class="field"><label class="f">Height (cm)</label><input type="number" step="0.1" id="ht_cm" value="${hEdit?hEdit.cm:''}"></div>
-        <div class="field"><label class="f">Date</label><input type="date" id="ht_date" value="${hEdit?hEdit.date:t}"></div>
+        <div class="field"><label class="f">Date</label><input type="date" id="ht_date" value="${hEdit?hEdit.date:trkDay()}" max="${t}" onchange="setTrkDate(this.value)"></div>
       </div>
       <button class="btn sm" onclick="saveHeightLog()">${hEdit?'Update Entry':'Log Height'}</button>
       ${hEdit?`<button class="btn ghost sm" onclick="cancelEdit()">Cancel</button>`:''}
@@ -1438,7 +1446,8 @@ function secTrackers(){
         <button type="button" class="btn ${(exEdit?exEdit.type:exerciseTypeSel)==='proper'?'':'ghost'} sm" onclick="exerciseTypeSel='proper'; renderSection();">Proper</button>
         <button type="button" class="btn ${(exEdit?exEdit.type:exerciseTypeSel)==='common'?'':'ghost'} sm" onclick="exerciseTypeSel='common'; renderSection();">Common</button>
       </div>
-      <div class="grid c2">
+      <div class="grid c3">
+        ${trkDateField('ex_date', exEdit)}
         <div class="field"><label class="f">Exercise Name</label><input type="text" id="ex_name" value="${exEdit?esc(exEdit.name||''):''}" placeholder="e.g. Push-ups, Running"></div>
         <div class="field"><label class="f">How Many / How Much</label><input type="text" id="ex_amount" value="${exEdit?esc(exEdit.amount||''):''}" placeholder="e.g. 3 sets x 20, 2 km"></div>
       </div>
@@ -1457,7 +1466,8 @@ function secTrackers(){
   <div class="panel" style="margin-top:16px;" id="trk_study">
     <h3><span class="ic">📚</span>STUDY TRACKER</h3>
     <div class="grid c4">
-      <div class="field"><label class="f">Hours</label><input type="number" step="0.1" id="sd_hours" value="${sdEdit?sdEdit.hours:''}"></div>
+      ${trkDateField('sd_date', sdEdit)}
+      <div class="field"><label class="f">Hours</label><input type="number" step="0.1" min="0" id="sd_hours" value="${sdEdit?sdEdit.hours:''}"></div>
       <div class="field"><label class="f">Subject</label><select id="sd_subject">${SUBJECT_OPTIONS.map(s=>`<option value="${s}" ${sdEdit&&sdEdit.subject===s?'selected':''}>${s}</option>`).join('')}</select></div>
       <div class="field"><label class="f">Topic</label><input type="text" id="sd_topic" value="${sdEdit?esc(sdEdit.topic||''):''}" placeholder="e.g. 1st Paper - Grammar"></div>
       <div class="field"><label class="f">Sessions</label><input type="number" id="sd_sessions" value="${sdEdit?sdEdit.sessions:1}"></div>
@@ -1513,53 +1523,57 @@ function saveScreenTime(){
 
 /* generic add/update for logs */
 function saveSleepLog(){
-  const bed=document.getElementById('sl_bed').value, wake=document.getElementById('sl_wake').value;
-  if(!bed||!wake) return;
-  if(editingTracker.name==='sleep'){ state.trackerLogs.sleep[editingTracker.index] = Object.assign({}, state.trackerLogs.sleep[editingTracker.index], {bed, wake}); editingTracker={name:null,index:null}; }
-  else state.trackerLogs.sleep.push({date:todayStr(), bed, wake});
-  saveState(); renderSection();
+  const bed=document.getElementById('sl_bed').value, wake=document.getElementById('sl_wake').value, date=trkPickDate('sl_date');
+  if(!bed||!wake){ toast('Enter both the bed time and the wake time.', 3500); return; }
+  if(editingTracker.name==='sleep'){ state.trackerLogs.sleep[editingTracker.index] = Object.assign({}, state.trackerLogs.sleep[editingTracker.index], {date, bed, wake}); editingTracker={name:null,index:null}; }
+  else state.trackerLogs.sleep.push({id:uid('t'), date, bed, wake});
+  trkDate = date; saveState(); renderSection();
+  toast('✓ Sleep saved for '+trkFmt(date)+' — '+sleepHours({bed,wake}).toFixed(1)+' h', 3000);
 }
 function saveWeightLog(){
   const kg=Number(document.getElementById('wt_kg').value); const date=document.getElementById('wt_date').value||todayStr();
-  if(!kg) return;
+  if(!kg){ toast('Enter your weight in kg.', 3000); return; }
   if(editingTracker.name==='weight'){ state.trackerLogs.weight[editingTracker.index] = Object.assign({}, state.trackerLogs.weight[editingTracker.index], {date, kg}); editingTracker={name:null,index:null}; }
-  else state.trackerLogs.weight.push({date, kg});
-  saveState(); renderSection();
+  else state.trackerLogs.weight.push({id:uid('t'), date, kg});
+  trkDate = date; saveState(); renderSection(); toast('✓ Weight saved for '+trkFmt(date), 2500);
 }
 function saveHeightLog(){
   const cm=Number(document.getElementById('ht_cm').value); const date=document.getElementById('ht_date').value||todayStr();
-  if(!cm) return;
+  if(!cm){ toast('Enter your height in cm.', 3000); return; }
   if(editingTracker.name==='height'){ state.trackerLogs.height[editingTracker.index] = Object.assign({}, state.trackerLogs.height[editingTracker.index], {date, cm}); editingTracker={name:null,index:null}; }
-  else state.trackerLogs.height.push({date, cm});
-  saveState(); renderSection();
+  else state.trackerLogs.height.push({id:uid('t'), date, cm});
+  trkDate = date; saveState(); renderSection(); toast('✓ Height saved for '+trkFmt(date), 2500);
 }
 function saveExerciseLog(){
   const name=document.getElementById('ex_name').value.trim();
   const amount=document.getElementById('ex_amount').value.trim();
   const gripper=Number(document.getElementById('ex_gripper').value)||0;
   const durationMin=Number(document.getElementById('ex_duration').value)||0;
-  const type = exerciseTypeSel;
-  if(!name && !gripper && !durationMin) return;
-  if(editingTracker.name==='exercise'){ state.trackerLogs.exercise[editingTracker.index] = Object.assign({}, state.trackerLogs.exercise[editingTracker.index], {type, name, amount, gripper, durationMin}); editingTracker={name:null,index:null}; }
-  else state.trackerLogs.exercise.push({date:todayStr(), type, name, amount, gripper, durationMin});
-  saveState(); renderSection();
+  const type = exerciseTypeSel, date = trkPickDate('ex_date');
+  if(!name && !gripper && !durationMin){ toast('Enter an exercise name, a duration or a gripper count.', 3500); return; }
+  if(editingTracker.name==='exercise'){ state.trackerLogs.exercise[editingTracker.index] = Object.assign({}, state.trackerLogs.exercise[editingTracker.index], {date, type, name, amount, gripper, durationMin}); editingTracker={name:null,index:null}; }
+  else state.trackerLogs.exercise.push({id:uid('t'), date, type, name, amount, gripper, durationMin});
+  trkDate = date; saveState(); renderSection();
+  toast('✓ Exercise saved for '+trkFmt(date), 3000);
 }
 function saveStudyLog(){
   const hours=Number(document.getElementById('sd_hours').value)||0;
   const subject=document.getElementById('sd_subject').value;
   const topic=document.getElementById('sd_topic').value;
   const sessions=Number(document.getElementById('sd_sessions').value)||1;
-  if(!hours) return;
+  const date = trkPickDate('sd_date');
+  if(!(hours>0)){ toast('Enter how many hours you studied.', 3500); return; }
   if(editingTracker.name==='study'){
     const old = state.trackerLogs.study[editingTracker.index];
-    addXP(Math.round((hours-old.hours)*10));
-    state.trackerLogs.study[editingTracker.index] = Object.assign({}, old, {hours, subject, topic, sessions});
+    addXP(Math.round((hours-Number(old.hours||0))*10));
+    state.trackerLogs.study[editingTracker.index] = Object.assign({}, old, {date, hours, subject, topic, sessions});
     editingTracker={name:null,index:null};
   } else {
-    state.trackerLogs.study.push({date:todayStr(), hours, subject, topic, sessions});
+    state.trackerLogs.study.push({id:uid('t'), date, hours, subject, topic, sessions});
     addXP(Math.round(hours*10));
   }
-  saveState(); renderSection();
+  trkDate = date; saveState(); renderSection();
+  toast('✓ Study saved for '+trkFmt(date)+' — '+hours+' h (+'+Math.round(hours*10)+' XP)', 3500);
 }
 
 /* ========================================================

@@ -4,8 +4,8 @@
    instantly from this device's saved data; the cloud is only
    used in the background.
    ============================================================ */
-const APP_VERSION = '10.0';
-const API_URL_RAW = 'https://operation-life-change-olc-3.onrender.com';   // <- your backend address (Render/Railway)
+const APP_VERSION = '10.3';
+const API_URL_RAW = 'https://operation-life-change-olc.onrender.com';   // <- your backend address (Render/Railway)
 const API_BASE_URL = (/^https?:\/\//i.test(API_URL_RAW.trim()) ? API_URL_RAW.trim() : 'https://' + API_URL_RAW.trim()).replace(/\/+$/, '');
 const SUFFIX = '@olc.com';
 
@@ -38,7 +38,10 @@ function deviceName(){
 const ACC_KEY = 'olc2_accounts', ACTIVE_KEY = 'olc2_active';
 let activeAccountId = null;
 function getAccounts(){ const a = LS.get(ACC_KEY, []); return Array.isArray(a) ? a : []; }
-function saveAccounts(list){ if(!LS.set(ACC_KEY, list)) toast('⚠ Device storage is full — export a backup and free some space.', 6000); }
+function saveAccounts(list){
+  if(LS.set(ACC_KEY, list)) return;
+  freeLocalSpace().then(() => { if(!LS.set(ACC_KEY, list)) toast('This browser\'s quick storage is full. Open Agent Profile → Storage and press “Free up space”.', 7000); });
+}
 function loggedAccount(){ return getAccounts().find(a => a.id === activeAccountId) || null; }
 function patchAccount(id, patch){ const l = getAccounts(); const a = l.find(x => x.id === id); if(a){ Object.assign(a, patch); saveAccounts(l); } return a; }
 const stateKey = (id) => 'olc2_state_' + id;
@@ -129,16 +132,88 @@ function stateSummary(s){
   return (s && s.profile && (s.profile.codename || s.profile.name) || 'Agent') + ' · ' + ((s && s.xp) || 0) + ' XP · ' + days + ' day(s) logged';
 }
 
-/* ---------- local backups (never lose data when something is replaced) ---------- */
+/* ---------- big storage (IndexedDB) ----------
+   The browser's quick storage (localStorage) holds only about 5 MB for the whole site. Saved copies, old-version copies and
+   (if the quick storage ever fills up) an emergency copy of your data live here instead, where there is room for hundreds of MB. */
+const Vault = (function(){
+  let dbp = null; const mem = new Map();
+  function open(){
+    if(dbp) return dbp;
+    dbp = new Promise((res) => { try{
+      const q = indexedDB.open('olc-vault', 1);
+      q.onupgradeneeded = () => { const d = q.result; if(!d.objectStoreNames.contains('kv')) d.createObjectStore('kv', { keyPath: 'k' }); };
+      q.onsuccess = () => res(q.result); q.onerror = () => res(null); q.onblocked = () => res(null);
+    }catch(e){ res(null); } });
+    return dbp;
+  }
+  async function put(k, v){
+    mem.set(k, v); const db = await open(); if(!db) return false;
+    return new Promise((res) => { try{ const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put({ k, v }); t.oncomplete = () => res(true); t.onerror = t.onabort = () => res(false); }catch(e){ res(false); } });
+  }
+  async function get(k){
+    const db = await open(); if(!db) return mem.has(k) ? mem.get(k) : null;
+    return new Promise((res) => { try{ const r = db.transaction('kv').objectStore('kv').get(k); r.onsuccess = () => res(r.result ? r.result.v : null); r.onerror = () => res(null); }catch(e){ res(null); } });
+  }
+  async function del(k){
+    mem.delete(k); const db = await open(); if(!db) return;
+    return new Promise((res) => { try{ const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').delete(k); t.oncomplete = t.onerror = t.onabort = () => res(); }catch(e){ res(); } });
+  }
+  async function keys(){
+    const db = await open(); if(!db) return [...mem.keys()];
+    return new Promise((res) => { try{ const r = db.transaction('kv').objectStore('kv').getAllKeys(); r.onsuccess = () => res(r.result || []); r.onerror = () => res([]); }catch(e){ res([]); } });
+  }
+  return { put, get, del, keys };
+})();
+function lsUsage(){
+  const items = []; let total = 0;
+  try{ for(let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); const len = k.length + (localStorage.getItem(k) || '').length; total += len; items.push({ k, len }); } }catch(e){}
+  items.sort((a, b) => b.len - a.len);
+  return { total, items };
+}
+
+/* ---------- local backups (never lose data when something is replaced) ----------
+   Saved copies are kept in the big storage (up to 5 per account). Copies that older versions left in the quick storage are moved here. */
+async function moveOldBackups(id){
+  const old = LS.get(bkKey(id), null);
+  if(!Array.isArray(old) || !old.length) return;
+  const cur = (await Vault.get('bk:' + id)) || [];
+  const merged = old.concat(cur).sort((a, b) => b.at - a.at).slice(0, 5);
+  if(await Vault.put('bk:' + id, merged)) LS.del(bkKey(id));
+}
+async function getBackups(id){
+  try{ await moveOldBackups(id); }catch(e){}
+  const v = await Vault.get('bk:' + id);
+  const q = LS.get(bkKey(id), []) || [];                         // only present if this browser has no big storage
+  return (Array.isArray(v) ? v : []).concat(Array.isArray(q) ? q : []).sort((a, b) => b.at - a.at);
+}
 function stashBackup(label, st){
   try{
     const id = activeAccountId; if(!id || !st) return;
-    const json = JSON.stringify(st);
-    if(json.length > 1500000) return; // don't risk the storage quota
-    const list = LS.get(bkKey(id), []) || [];
-    list.unshift({ label, at: Date.now(), data: st });
-    LS.set(bkKey(id), list.slice(0, 3));
+    const copy = clone(st), entry = { label, at: Date.now(), data: copy };
+    (async () => {
+      try{
+        await moveOldBackups(id);
+        const list = (await Vault.get('bk:' + id)) || [];
+        list.unshift(entry);
+        const ok = await Vault.put('bk:' + id, list.slice(0, 5));
+        if(!ok && JSON.stringify(copy).length < 600000) LS.set(bkKey(id), [entry]);     // no big storage in this browser: keep one small copy
+      }catch(e){}
+    })();
   }catch(e){}
+}
+/* make room in the quick storage WITHOUT deleting anything: saved copies and already-imported old-version copies move to the big storage */
+async function freeLocalSpace(){
+  const before = lsUsage().total;
+  try{
+    for(const a of getAccounts()) await moveOldBackups(a.id);
+    const migrated = LS.get('olc2_migrated', []) || [];
+    for(const k of migrated){
+      let raw = null; try{ raw = localStorage.getItem(k); }catch(e){}
+      if(!raw) continue;
+      if(await Vault.put('legacy:' + k, raw)){ const chk = await Vault.get('legacy:' + k); if(chk === raw) LS.del(k); }
+    }
+  }catch(e){}
+  return Math.max(0, before - lsUsage().total);
 }
 
 /* ============================================================
@@ -179,17 +254,43 @@ function commitLocal(){
 }
 
 /* ---------- local persistence + save pipeline ---------- */
-let localTimer = null, pushTimer = null;
+let localTimer = null, pushTimer = null, lsWarnAt = 0, lsFreeing = false, editSeq = 0;
 function persistLocal(){
-  if(!activeAccountId || !state) return;
+  if(!activeAccountId || !state) return false;
   commitLocal();
-  const ok = LS.set(stateKey(activeAccountId), state);
-  LS.set(metaKey(activeAccountId), meta);
-  if(!ok) toast('⚠ Could not save on this device (storage full). Export a backup now.', 7000);
+  const id = activeAccountId;
+  const ok = LS.set(stateKey(id), state);
+  LS.set(metaKey(id), meta);
+  if(ok) return true;
+  /* the quick storage is full — nothing is lost: an emergency copy goes to the big storage right now (and is merged back
+     in the next time OLC opens), room is made, and the save is tried again */
+  Vault.put('state:' + id, { at: Date.now(), state: clone(state) });
+  if(!lsFreeing){
+    lsFreeing = true;
+    freeLocalSpace().then(() => {
+      lsFreeing = false;
+      if(activeAccountId !== id || !state) return;
+      if(LS.set(stateKey(id), state)){ LS.set(metaKey(id), meta); Vault.del('state:' + id); }
+      else if(Date.now() - lsWarnAt > 90000){ lsWarnAt = Date.now(); toast('Your data is safe (kept in big storage + the cloud), but this browser\'s quick storage is full. Open Agent Profile → Storage to free space.', 8000); }
+    }).catch(() => { lsFreeing = false; });
+  }
+  return false;
+}
+/* merge back an emergency copy left by a moment when the quick storage was full */
+async function recoverVaultState(){
+  const id = activeAccountId; if(!id) return;
+  const v = await Vault.get('state:' + id); if(!v || !v.state) return;
+  if(id !== activeAccountId || !state) return;
+  try{
+    applyRemote(hydrateState(clone(v.state)));                     // a merge, never a replacement
+    meta.dirty = true; meta.seq++; editSeq++;
+    if(persistLocal()) Vault.del('state:' + id);
+    schedulePush(400);
+  }catch(e){}
 }
 function saveState(){
   if(!activeAccountId || !state) return;
-  meta.dirty = true; meta.seq++;
+  meta.dirty = true; meta.seq++; editSeq++;
   clearTimeout(localTimer); localTimer = setTimeout(persistLocal, 250);
   schedulePush(650);
   setSync(navigator.onLine === false ? 'offline' : 'pending');
@@ -307,7 +408,7 @@ function openSyncDiag(){
   })();
 }
 
-let syncing = false, syncAgain = false, backoff = 0, lastSyncOk = 0, pendingRender = false, refreshTimer = null;
+let syncing = false, syncAgain = false, backoff = 0, lastSyncOk = 0, pendingRender = false, refreshTimer = null, syncStartedAt = 0, syncRun = 0, autoCycles = 0;
 function schedulePush(ms){ clearTimeout(pushTimer); pushTimer = setTimeout(() => syncNow(), ms); }
 function retryLater(){ backoff = Math.min(backoff ? backoff * 2 : 4000, 90000); schedulePush(backoff); }
 const isTyping = () => { const a = document.activeElement; return !!(a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)); };
@@ -316,16 +417,20 @@ const uiBusy = () => isTyping() || (window.OLC_BUSY || []).some(f => { try{ retu
 async function syncNow(opts){
   opts = opts || {};
   const acc = loggedAccount();
-  if(!acc || !acc.token || !state) return;
-  if(acc.expired){ setSync('auth'); return; }
+  if(!acc || !state) return;
+  if(!acc.token || acc.expired){ setSync('auth'); return; }      // never leave the light on "Saving…" when nothing can be sent
   if(navigator.onLine === false){ setSync('offline'); return; }
-  if(syncing){ syncAgain = true; return; }
-  syncing = true;
+  if(syncing){
+    if(Date.now() - syncStartedAt < 100000){ syncAgain = true; return; }
+    syncing = false;                                            // a previous attempt hung: let a fresh one start
+  }
+  syncing = true; syncStartedAt = Date.now(); const run = ++syncRun, e0 = editSeq;
   if(meta.dirty || opts.manual) setSync('syncing');
   const id = acc.id;
   try{
     persistLocal();                                             // stamps edits that are not stamped yet
-    if(typeof Blobs !== 'undefined') await Blobs.uploadPending(acc).catch(() => {});   // files first, so other devices can open them
+    /* small files get a few seconds' head start so other devices can open them, but pictures can never hold the data back */
+    if(typeof Blobs !== 'undefined' && !Blobs.busy()) await Promise.race([Blobs.uploadPending(acc).catch(() => {}), new Promise((r) => setTimeout(r, 2500))]);
     if(activeAccountId !== id) return;
     const seq = meta.seq, t0 = Date.now();
     if(legacyServer){ const okL = await legacySync(acc, opts); if(okL){ lastSyncOk = Date.now(); backoff = 0; LS.set(metaKey(id), meta); setSync(meta.dirty ? 'pending' : 'ok'); if(meta.dirty) schedulePush(600); } return; }
@@ -348,13 +453,17 @@ async function syncNow(opts){
     } else if(d.state){ applyRemote(d.state); }
     if(typeof d.v === 'number') meta.v = d.v;
     if(posted && meta.seq === seq) meta.dirty = false;
+    /* safety: if nothing was edited but the data keeps flagging itself as changed, stop after a few rounds instead of "Saving…" forever.
+       (Nothing is lost — the next real edit sends everything again.) */
+    if(meta.dirty && editSeq === e0){ if(++autoCycles >= 4){ autoCycles = 0; meta.dirty = false; } } else autoCycles = 0;
     lastSyncOk = Date.now();
     LS.set(metaKey(id), meta);
     setSync(meta.dirty ? 'pending' : 'ok');
     if(meta.dirty) schedulePush(600);
     if(typeof catSync === 'function') setTimeout(catSync, 50);
+    if(typeof Blobs !== 'undefined') Blobs.uploadPending(acc);      // pictures continue in the background
   }catch(e){ setSync(navigator.onLine === false ? 'offline' : 'error', 'cannot reach ' + API_BASE_URL + ' (' + (e && e.name === 'AbortError' ? 'timed out — server may be waking up' : 'blocked or wrong address') + ')'); retryLater(); }
-  finally{ syncing = false; if(syncAgain){ syncAgain = false; schedulePush(250); } }
+  finally{ if(run === syncRun){ syncing = false; if(syncAgain){ syncAgain = false; schedulePush(250); } } }
 }
 /* combine the cloud copy with this device's copy — field by field */
 function applyRemote(remote, opts){
@@ -781,7 +890,7 @@ async function switchAccount(id){
     }
     if(!got){ st = hydrateState({}); st.profile.codename = acc.username.split('@')[0]; useState(st, { v: 0, fresh: true }); }
   }
-  persistLocal();
+  persistLocal(); recoverVaultState();
   applyStateToUI(); currentSection = 'home'; go('home'); renderAll();
   toast('Switched to ' + acc.username);
   setSync(acc.expired ? 'auth' : 'idle');
@@ -1019,7 +1128,7 @@ function accountPanelsHTML(){
     </div>
     <div class="eyebrow" style="margin:14px 0 6px;">SAVED COPIES (BACKUPS)</div>
     <div id="bkList" class="stat-label">Loading…</div>
-    <div class="btnrow" style="margin-top:12px;"><button class="btn ghost sm" onclick="runDiagnostics()">🩺 Run diagnostics (images &amp; server)</button></div>
+    <div class="btnrow" style="margin-top:12px;"><button class="btn ghost sm" onclick="openStorageModal()">💾 Storage &amp; free space</button> <button class="btn ghost sm" onclick="runDiagnostics()">🩺 Run diagnostics (images &amp; server)</button></div>
     <div class="stat-label" style="margin-top:8px;">OLC v${APP_VERSION}</div>
   </div>`;
 }
@@ -1042,7 +1151,7 @@ async function signOutDevice(sid){
 }
 async function loadBackups(){
   const el = $('bkList'); if(!el) return;
-  const acc = loggedAccount(); const local = LS.get(bkKey(activeAccountId), []) || [];
+  const acc = loggedAccount(); const local = await getBackups(activeAccountId);
   let server = [];
   if(acc && acc.token && !acc.expired){ try{ const r = await api('GET', '/api/backups', null, acc.token, { timeout: 25000 }); if(r.ok) server = r.data.backups; }catch(e){} }
   if(!$('bkList')) return;
@@ -1056,8 +1165,8 @@ function replaceStateWith(st, label){
   stashBackup('Before ' + label, state);
   adoptSnapshot(st); applyStateToUI(); renderAll(); toast('✓ ' + label + ' restored', 4000);
 }
-function restoreLocalBackup(i){
-  const b = (LS.get(bkKey(activeAccountId), []) || [])[i]; if(!b) return;
+async function restoreLocalBackup(i){
+  const b = (await getBackups(activeAccountId))[i]; if(!b) return;
   if(confirm('Restore this saved copy?\n\n' + stateSummary(b.data) + '\n\nYour current data is backed up first.')) replaceStateWith(b.data, 'saved copy');
 }
 async function restoreServerBackup(id){
@@ -1136,6 +1245,52 @@ async function setAccountAvatarFromFile(file){
 }
 
 /* ============================================================
+   STORAGE — what is using space on this device, and a safe "free up space" (moves, never deletes)
+   ============================================================ */
+const mb = (n) => (n / 1048576).toFixed(n < 1048576 * 10 ? 2 : 1) + ' MB';
+function storageLabel(k){
+  if(/^olc2_state_/.test(k)) return 'Your OLC data (this account)';
+  if(/^olc2_bk_/.test(k)) return 'Saved copies (older versions kept here)';
+  if(/^olc_state/.test(k)) return 'Copy from an older OLC version';
+  if(/^olc_accounts/.test(k)) return 'Old account list';
+  if(/^olc2_accounts/.test(k)) return 'Signed-in accounts';
+  if(/^olc2_cat_/.test(k)) return 'Shared medals / divisions bookkeeping';
+  return k.length > 34 ? k.slice(0, 34) + '…' : k;
+}
+async function openStorageModal(){
+  openModal('<h3 style="justify-content:center;">💾 STORAGE</h3><div id="stBody" class="stat-label" style="line-height:1.7">Measuring…</div>');
+  const draw = async () => {
+    const el = $('stBody'); if(!el) return;
+    const u = lsUsage(), pct = Math.min(100, Math.round(u.total / 5242880 * 100));
+    let st = { files: 0, bytes: 0, waiting: 0 }; try{ if(typeof Blobs !== 'undefined') st = await Blobs.stats(); }catch(e){}
+    let vk = []; try{ vk = await Vault.keys(); }catch(e){}
+    const nBk = vk.filter(k => /^bk:/.test(k)).length, nLeg = vk.filter(k => /^legacy:/.test(k)).length, emerg = vk.some(k => /^state:/.test(k));
+    const col = pct > 85 ? 'var(--danger)' : pct > 60 ? 'var(--gold)' : 'var(--green)';
+    el.innerHTML = `
+      <div class="eyebrow">QUICK STORAGE OF THIS BROWSER</div>
+      <div class="bar" style="margin:6px 0;"><i style="width:${pct}%; background:${col}"></i></div>
+      <div>${mb(u.total)} used of about 5 MB (${pct}%)</div>
+      <div style="margin-top:8px;">${u.items.slice(0, 5).map(x => `<div class="dev-row" style="padding:3px 0;"><span>${esc(storageLabel(x.k))}</span><span class="mono">${mb(x.len)}</span></div>`).join('')}</div>
+      <div class="eyebrow" style="margin-top:12px;">BIG STORAGE (pictures, PDFs, saved copies)</div>
+      <div>${st.files} picture / PDF file(s) · ${mb(st.bytes)}${st.waiting ? ' · ' + st.waiting + ' still uploading to the cloud' : ' · all uploaded'}</div>
+      <div>${nBk} saved-copy list(s) · ${nLeg} old-version copy(ies) kept safely${emerg ? ' · an emergency copy of your latest entries is waiting to be merged' : ''}</div>
+      <div style="margin-top:10px;">“Free up space” <b>moves</b> saved copies and already-imported old copies into the big storage. Nothing is deleted.</div>
+      <div class="btnrow" style="margin-top:12px;">
+        <button class="btn sm" onclick="doFreeSpace()">🧹 Free up space</button>
+        <button class="btn ghost sm" onclick="exportMyData()">⬇ Download backup</button>
+        <button class="btn ghost sm" onclick="closeModal()">Close</button>
+      </div>`;
+  };
+  window.__stDraw = draw; draw();
+}
+async function doFreeSpace(){
+  toast('Moving copies to big storage…', 2000);
+  const n = await freeLocalSpace();
+  toast(n > 0 ? '✓ Freed ' + mb(n) + ' — nothing was deleted' : 'Nothing more to move — your data itself is what is using the space.', 5000);
+  if(window.__stDraw) window.__stDraw();
+}
+
+/* ============================================================
    DIAGNOSTICS — find out exactly why images / server fail
    ============================================================ */
 async function runDiagnostics(){
@@ -1151,7 +1306,7 @@ async function runDiagnostics(){
   add(!missing.length, missing.length ? missing.length + ' of ' + files.length + ' image files are MISSING on the website: ' + missing.slice(0, 6).join(', ') + (missing.length > 6 ? '…' : '') + ' — re-upload the whole assets folder to GitHub.' : 'All ' + files.length + ' image files are present.');
   try{ const regs = navigator.serviceWorker ? await navigator.serviceWorker.getRegistrations() : []; add(regs.length > 0, regs.length ? 'Offline cache (service worker) active' : 'Offline cache not active (works only on https)'); }catch(e){}
   let bytes = 0; try{ for(let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); bytes += k.length + (localStorage.getItem(k) || '').length; } }catch(e){}
-  add(bytes < 4.2e6, 'Device storage used: ' + (bytes / 1048576).toFixed(2) + ' MB of about 5 MB' + (bytes >= 4.2e6 ? ' — nearly full! Download a backup and remove big uploaded images.' : ''));
+  add(bytes < 4.2e6, 'Device storage used: ' + (bytes / 1048576).toFixed(2) + ' MB of about 5 MB' + (bytes >= 4.2e6 ? ' — nearly full! Open Storage and press “Free up space” (nothing is deleted).' : ''));
   add(true, 'Your data: ' + stateSummary(state));
   if($('diagOut')) $('diagOut').innerHTML = out.join('');
 }
@@ -1205,6 +1360,7 @@ function enterApp(){
   setSync(syncInfo.status === 'idle' ? 'idle' : syncInfo.status);
   pullState({ manual: true });
   (window.requestIdleCallback || ((f) => setTimeout(f, 1500)))(() => { try{ upgradeInlineImages(); }catch(e){} });
+  setTimeout(() => { try{ recoverVaultState(); if(lsUsage().total > 3.2e6) freeLocalSpace(); }catch(e){} }, 600);     // keep the quick storage from filling up
 }
 function repairData(){ stashBackup('Before repair', state); state = hydrateState(state); prevSnap = OLCMerge.snapshot(state); saveState(); renderAll(); toast('Repaired'); }
 function boot(){
