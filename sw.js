@@ -1,5 +1,5 @@
 /* OLC service worker v10 — opens instantly from the device, updates quietly in the background */
-const VER = 'olc-v12-1';
+const VER = 'olc-v12-2';
 const SHELL = ['./', 'index.html', 'style.css', 'merge.js', 'app.js', 'blobs.js', 'v10.js', 'v11.js', 'catalog.js', 'journal.js', 'cloud-config.js', 'auth.js', 'manifest.json'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(VER).then(c => c.addAll(SHELL).catch(() => {})).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== VER).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
