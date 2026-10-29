@@ -436,7 +436,7 @@ async function syncNow(opts){
     if(legacyServer){ const okL = await legacySync(acc, opts); if(okL){ lastSyncOk = Date.now(); backoff = 0; LS.set(metaKey(id), meta); setSync(meta.dirty ? 'pending' : 'ok'); if(meta.dirty) schedulePush(600); } return; }
     let r, posted = false;
     if(meta.fresh && !opts.force) r = await api('GET', '/api/sync?v=0', null, acc.token, { timeout: 45000 });
-    else if(meta.dirty || opts.force || !meta.v){ posted = true; r = await api('POST', '/api/sync', { state, device: deviceId }, acc.token, { timeout: 70000, gzip: true }); }
+    else if(meta.dirty || opts.force || !meta.v){ posted = true; r = await api('POST', '/api/sync', { state, device: deviceId }, acc.token, { timeout: 70000 }); }
     else r = await api('GET', '/api/sync?v=' + meta.v, null, acc.token, { timeout: 30000 });
     if(activeAccountId !== id) return;
     noteClock(r, t0);
