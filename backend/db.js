@@ -12,8 +12,7 @@ const path = require('path');
 async function createPool() {
   const url = process.env.DATABASE_URL;
   if (!url) {
-    console.error('\n✖ DATABASE_URL is not set.\n  Create a free PostgreSQL database (Neon / Supabase) and set DATABASE_URL.\n  For a throw-away local test only:  DATABASE_URL=memory npm start\n');
-    process.exit(1);
+    throw new Error('DATABASE_URL is not set');
   }
   if (url === 'memory') {
     const { newDb } = require('pg-mem');
