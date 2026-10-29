@@ -78,6 +78,14 @@ const SCHEMA = [
      created_at BIGINT NOT NULL,
      PRIMARY KEY (user_id, id)
    )`,
+  `CREATE TABLE IF NOT EXISTS blob_parts (
+     user_id TEXT NOT NULL,
+     id TEXT NOT NULL,
+     part INTEGER NOT NULL,
+     data BYTEA NOT NULL,
+     created_at BIGINT NOT NULL,
+     PRIMARY KEY (user_id, id, part)
+   )`,
   `CREATE TABLE IF NOT EXISTS catalog (
      kind TEXT NOT NULL,
      id TEXT NOT NULL,

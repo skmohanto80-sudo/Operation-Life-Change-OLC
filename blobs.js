@@ -59,10 +59,26 @@ const Blobs = (function(){
       const acc = (typeof loggedAccount === 'function') ? loggedAccount() : null;
       if(!acc || !acc.token || navigator.onLine === false) return null;
       try{
-        const res = await tfetch(API_BASE_URL + '/api/blobs/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + acc.token } }, 60000);
-        if(!res.ok) return null;
-        const blob = await res.blob();
-        await putRec({ id, mime: blob.type || res.headers.get('content-type') || 'application/octet-stream', size: blob.size, blob, up: 1, at: Date.now() });
+        const url = API_BASE_URL + '/api/blobs/' + encodeURIComponent(id);
+        const first = await tfetch(url, { headers: { Authorization: 'Bearer ' + acc.token, Range: `bytes=0-${API_CHUNK_BYTES - 1}` } }, 60000);
+        if(!first.ok) return null;
+        let blob;
+        if(first.status === 206){
+          const range = String(first.headers.get('content-range') || '').match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+          if(!range) return null;
+          const total = Number(range[3]), parts = [await first.blob()];
+          let offset = parts[0].size;
+          while(offset < total){
+            const end = Math.min(total - 1, offset + API_CHUNK_BYTES - 1);
+            const next = await tfetch(url, { headers: { Authorization: 'Bearer ' + acc.token, Range: `bytes=${offset}-${end}` } }, 60000);
+            if(!next.ok || next.status !== 206) return null;
+            const piece = await next.blob(); if(!piece.size) return null;
+            parts.push(piece); offset += piece.size;
+          }
+          blob = new Blob(parts, { type: first.headers.get('content-type') || 'application/octet-stream' });
+          if(blob.size !== total) return null;
+        } else blob = await first.blob(); // Older backends ignore Range and return the whole file.
+        await putRec({ id, mime: blob.type || first.headers.get('content-type') || 'application/octet-stream', size: blob.size, blob, up: 1, at: Date.now() });
         return blob;
       }catch(e){ return null; }
     })();
@@ -102,6 +118,7 @@ const Blobs = (function(){
      - one run at a time; a file that fails is retried later with a growing pause, not on every sync
      - when the cloud file store is full the app says so once, then carries on (files stay safe on this device) */
   let upRunning = null, quotaToastAt = 0;
+  const API_CHUNK_BYTES = 4 * 1024 * 1024;
   const tfetch = async (url, opts, ms) => { const c = new AbortController(); const t = setTimeout(() => c.abort(), ms); try{ return await fetch(url, Object.assign({ signal: c.signal }, opts)); } finally { clearTimeout(t); } };
   function uploadPending(acc){
     if(upRunning) return upRunning;
@@ -119,12 +136,24 @@ const Blobs = (function(){
       for(const rec of list){
         if(have.includes(rec.id)){ rec.up = 1; await putRec(rec); continue; }
         try{
-          const res = await tfetch(API_BASE_URL + '/api/blobs/' + encodeURIComponent(rec.id) + '?m=' + encodeURIComponent(rec.mime), { method: 'PUT', headers: { Authorization: 'Bearer ' + acc.token, 'Content-Type': 'application/octet-stream' }, body: rec.blob }, 90000);
-          if(res.ok){ rec.up = 1; rec.fails = 0; rec.retryAt = 0; await putRec(rec); }
-          else if(res.status === 413){
-            if(typeof toast === 'function' && Date.now() - quotaToastAt > 3600e3){ quotaToastAt = Date.now(); toast('Cloud file storage is full — your pictures stay safe on this device. Your data still syncs normally.', 7000); }
-            return;
-          } else { rec.fails = (rec.fails || 0) + 1; rec.retryAt = Date.now() + Math.min(30 * 60e3, 30e3 * Math.pow(2, rec.fails)); await putRec(rec); }
+          const partCount = Math.ceil(rec.size / API_CHUNK_BYTES);
+          let uploaded = true;
+          for(let part = 0; part < partCount; part++){
+            const piece = rec.blob.slice(part * API_CHUNK_BYTES, Math.min(rec.size, (part + 1) * API_CHUNK_BYTES));
+            const q = '?m=' + encodeURIComponent(rec.mime) + '&part=' + part + '&parts=' + partCount + '&bytes=' + rec.size;
+            const res = await tfetch(API_BASE_URL + '/api/blobs/' + encodeURIComponent(rec.id) + '/parts' + q, { method: 'POST', headers: { Authorization: 'Bearer ' + acc.token, 'Content-Type': 'application/octet-stream' }, body: piece }, 90000);
+            if(!res.ok){
+              uploaded = false;
+              if(res.status === 413){
+                if(typeof toast === 'function' && Date.now() - quotaToastAt > 3600e3){ quotaToastAt = Date.now(); toast('Cloud file storage is full — your pictures stay safe on this device. Your data still syncs normally.', 7000); }
+                return;
+              }
+              break;
+            }
+            if(part === partCount - 1){ let result = null; try{ result = await res.json(); }catch(e){} if(!result || !result.complete){ uploaded = false; break; } }
+          }
+          if(uploaded){ rec.up = 1; rec.fails = 0; rec.retryAt = 0; await putRec(rec); }
+          else { rec.fails = (rec.fails || 0) + 1; rec.retryAt = Date.now() + Math.min(30 * 60e3, 30e3 * Math.pow(2, rec.fails)); await putRec(rec); }
         }catch(e){ rec.fails = (rec.fails || 0) + 1; rec.retryAt = Date.now() + Math.min(30 * 60e3, 30e3 * Math.pow(2, rec.fails)); await putRec(rec); return; }
       }
     })().catch(() => {}).finally(() => { upRunning = null; });

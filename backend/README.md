@@ -1,45 +1,28 @@
-# OLC Backend v2 (accounts + safe sync)
+# OLC backend — Vercel + existing Neon database
 
-Needs two free things:
-1. **A PostgreSQL database** (this is what keeps your data forever)
-2. **A Node host** (Render) that runs this folder
+This deployment moves the Node API off the suspended Render workspace. It keeps the PostgreSQL schema and login system, so use the **same Neon database** to retain existing OLC accounts and saved entries.
 
-## Step 1 — free database (Neon, 3 minutes)
-1. Go to neon.tech → sign up (Google login is fine) → *Create project*.
-2. Copy the **connection string** (starts with `postgresql://...`).
+## Deploy the API on Vercel Hobby
 
-## Step 2 — Render
-1. Put this `backend/` folder in GitHub (same repo or a new one).
-2. Render → *New Web Service* → pick the repo (Root Directory = `backend` if needed).
-3. Build command: `npm install`   Start command: `npm start`
-4. Environment variables:
-   - `DATABASE_URL` = the Neon connection string  ← **required**
-   - `OLC_ADMIN_KEY` = a long secret only you know (turns on the owner panel at `https://YOUR-SERVICE.onrender.com/admin`)
-   - `OLC_CATALOG_EDIT` = `anyone` (default: every account may edit shared ranks/medals/badges/divisions) or `owner` (only the creating account)
-5. Deploy. Open `https://YOUR-SERVICE.onrender.com/api/health` — it must show `"storage":"postgres"`.
+1. Sign in to Vercel and import the `Operation-Life-Change-OLC` GitHub repository.
+2. In Project Settings → General, set **Root Directory** to `backend`.
+3. In Project Settings → Environment Variables, add:
+   - `DATABASE_URL` — the connection string for the existing Neon database.
+   - `OLC_ADMIN_KEY` — the existing admin key, if you use the owner panel.
+   - `OLC_CATALOG_EDIT` — optional; use `anyone` or `owner`.
+4. Set the Vercel Function region close to the Neon database region. This reduces the database round-trip time.
+5. Deploy. Open `https://YOUR-VERCEL-DOMAIN/api/health`; it should report `"storage":"postgres"`.
 
-If your Render address is not `https://operation-life-change-olc.onrender.com`, change `API_BASE_URL` at the top of `frontend/auth.js`.
+Do not create a new database unless you intend to migrate data. A blank replacement database will not contain your existing accounts.
 
-## Why the old backend lost data
-It saved to a file (`db.json`). Render's free disk is wiped on every restart/redeploy, so accounts vanished and the app showed errors. This version only uses PostgreSQL, so restarts cannot erase anything.
+## Point the website at Vercel
 
-## Safety built in
-- A save is accepted only if the device saw the latest cloud version; otherwise the server returns its copy and the app merges safely.
-- A blank state can never overwrite saved data.
-- Automatic cloud backups (every 6 h and before forced overwrites), restorable from Agent Profile.
+After Vercel gives the API a `*.vercel.app` domain, edit `frontend/cloud-config.js` and replace the Render URL with that domain. Upload the updated `frontend/` folder to the GitHub Pages branch/source. The service-worker cache version was advanced so each device can download the new API setting; close and reopen OLC once after the site updates.
 
-## Test
-`npm install && npm test && node test/frontend.js && node test/sections.js` (uses an in-memory database).
+The website remains local-first. Daily state is compressed before syncing. File uploads use 4 MiB chunks so they fit Vercel's request limit; downloads are also chunked. The app's existing 40 MiB per-file limit remains.
 
+## Keep your existing data
 
-## Owner panel (see every account / control the server)
-Set `OLC_ADMIN_KEY` on Render, redeploy, open `/admin`, type the key (it is sent in a header, never in the URL).
-You can: see server totals; list every account with last activity, devices and data size; download any account's data; restore its backups;
-sign it out everywhere; reset its password (shows a new password + recovery code once); delete it (type its exact username);
-remove a shared medal/badge/division/rank for everyone; close or open new sign-ups; export the whole server.
-Passwords are stored hashed, so nobody (including you) can read them — you can only reset them.
+The API uses the existing PostgreSQL tables and does not reset accounts on deploy. Before changing `DATABASE_URL`, confirm the Neon project is active and that the connection string points to the database that contains your accounts. Do not delete or reset the Neon project during this move.
 
-## Shared catalog
-Ranks (XP thresholds), medals, badges and divisions are shared by ALL accounts on this server. Each account keeps its own progress,
-earned achievements, times earned and which division is ON. Files (pictures/PDFs) are shared by content as well.
-Deploy order: backend first, then the frontend.
+Vercel Hobby includes 1 million function invocations per month and allows a maximum 60-second function duration without Fluid Compute. The live-sync stream reconnects after a function ends. Free platform quotas still apply. If you later replace Neon, migrate the PostgreSQL data first, including account hashes, sessions, states, backups, catalog entries, and files.

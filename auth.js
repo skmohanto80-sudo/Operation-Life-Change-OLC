@@ -5,7 +5,7 @@
    used in the background.
    ============================================================ */
 const APP_VERSION = '10.3';
-const API_URL_RAW = 'https://operation-life-change-olc-3.onrender.com';   // <- your backend address (Render/Railway)
+const API_URL_RAW = window.OLC_API_URL || 'https://operation-life-change-olc-3.onrender.com';
 const API_BASE_URL = (/^https?:\/\//i.test(API_URL_RAW.trim()) ? API_URL_RAW.trim() : 'https://' + API_URL_RAW.trim()).replace(/\/+$/, '');
 const SUFFIX = '@olc.com';
 

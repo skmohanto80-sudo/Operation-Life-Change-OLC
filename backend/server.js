@@ -118,7 +118,7 @@ function stateWeight(s) {
 }
 const safeParse = (t) => { try { return JSON.parse(t); } catch (e) { return null; } };
 
-async function main() {
+async function main(options = {}) {
   const db = await init();
   const fp = (secret) => crypto.createHmac('sha256', db.pepper).update(String(secret)).digest('hex');
 
@@ -373,6 +373,36 @@ async function main() {
 
   /* ---------- big files (images, PDFs) kept apart from the data so syncing stays fast ---------- */
   const okId = (id) => /^[A-Za-z0-9_-]{6,80}$/.test(String(id || ''));
+  const BLOB_CHUNK_BYTES = 4 * 1024 * 1024; // Vercel Functions cap each request/response at 4.5 MB.
+  app.post('/api/blobs/:id/parts', auth, express.raw({ type: () => true, limit: BLOB_CHUNK_BYTES }), wrap(async (req, res) => {
+    if (!okId(req.params.id)) return fail(res, 400, 'Bad file id');
+    const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const part = Number(req.query.part), totalParts = Number(req.query.parts), totalBytes = Number(req.query.bytes);
+    if (!buf.length || !Number.isInteger(part) || !Number.isInteger(totalParts) || !Number.isInteger(totalBytes) ||
+        part < 0 || totalParts < 1 || part >= totalParts || totalBytes < 1 || totalBytes > MAX_BLOB_BYTES ||
+        totalParts !== Math.ceil(totalBytes / BLOB_CHUNK_BYTES) || buf.length > BLOB_CHUNK_BYTES ||
+        buf.length !== Math.min(BLOB_CHUNK_BYTES, totalBytes - part * BLOB_CHUNK_BYTES))
+      return fail(res, 400, 'Invalid file part');
+    const have = await db.query(`SELECT 1 FROM blobs WHERE id=$1`, [req.params.id]);
+    if (have.rows.length) return res.json({ ok: true, existed: true, complete: true });
+    const mime = String(req.query.m || 'application/octet-stream').slice(0, 80).replace(/[^A-Za-z0-9.+\-/]/g, '');
+    const used = await db.query(`SELECT COALESCE(SUM(size),0) AS n FROM blobs WHERE user_id=$1`, [req.user.id]);
+    if (Number(used.rows[0].n) + totalBytes > MAX_USER_BLOB_BYTES) return fail(res, 413, 'Cloud file storage is full', { code: 'quota' });
+    const now = Date.now();
+    await db.query(`DELETE FROM blob_parts WHERE created_at < $1`, [now - 48 * 3600e3]);
+    await db.query(`INSERT INTO blob_parts (user_id, id, part, data, created_at) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT (user_id, id, part) DO UPDATE SET data=EXCLUDED.data, created_at=EXCLUDED.created_at`,
+      [req.user.id, req.params.id, part, buf, now]);
+    const r = await db.query(`SELECT part, data FROM blob_parts WHERE user_id=$1 AND id=$2 ORDER BY part`, [req.user.id, req.params.id]);
+    if (r.rows.length < totalParts) return res.json({ ok: true, complete: false, received: r.rows.length });
+    if (r.rows.length !== totalParts) return fail(res, 409, 'File upload has inconsistent parts');
+    const full = Buffer.concat(r.rows.map((x) => Buffer.from(x.data)));
+    if (full.length !== totalBytes) return fail(res, 409, 'File upload size did not match');
+    await db.query(`INSERT INTO blobs (user_id, id, mime, size, data, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id, id) DO NOTHING`,
+      [req.user.id, req.params.id, mime, full.length, full, now]);
+    await db.query(`DELETE FROM blob_parts WHERE user_id=$1 AND id=$2`, [req.user.id, req.params.id]);
+    res.json({ ok: true, complete: true });
+  }));
   app.put('/api/blobs/:id', auth, express.raw({ type: () => true, limit: MAX_BLOB_BYTES }), wrap(async (req, res) => {
     if (!okId(req.params.id)) return fail(res, 400, 'Bad file id');
     const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
@@ -388,9 +418,24 @@ async function main() {
   }));
   app.get('/api/blobs/:id', auth, wrap(async (req, res) => {
     if (!okId(req.params.id)) return fail(res, 400, 'Bad file id');
+    const range = String(req.headers.range || '').match(/^bytes=(\d+)-(\d*)$/);
+    const meta = await db.query(`SELECT mime, size FROM blobs WHERE id=$1 LIMIT 1`, [req.params.id]);
+    if (!meta.rows.length) return fail(res, 404, 'File not found');
+    const size = Number(meta.rows[0].size);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Math.min(range[2] ? Number(range[2]) : start + BLOB_CHUNK_BYTES - 1, start + BLOB_CHUNK_BYTES - 1, size - 1);
+      if (!Number.isInteger(start) || start < 0 || start >= size || end < start) return fail(res, 416, 'Invalid file range');
+      const r = await db.query(`SELECT SUBSTRING(data FROM $2 FOR $3) AS data FROM blobs WHERE id=$1 LIMIT 1`, [req.params.id, start + 1, end - start + 1]);
+      const data = Buffer.from(r.rows[0].data);
+      res.status(206).set({ 'Content-Type': meta.rows[0].mime, 'Cache-Control': 'private, max-age=31536000, immutable',
+        'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(data.length) });
+      return res.send(data);
+    }
+    if (size > BLOB_CHUNK_BYTES) return fail(res, 416, 'This file needs range downloads. Update the app and try again.');
     const r = await db.query(`SELECT mime, data FROM blobs WHERE id=$1 LIMIT 1`, [req.params.id]);
     if (!r.rows.length) return fail(res, 404, 'File not found');
-    res.set({ 'Content-Type': r.rows[0].mime, 'Cache-Control': 'private, max-age=31536000, immutable' });
+    res.set({ 'Content-Type': r.rows[0].mime, 'Cache-Control': 'private, max-age=31536000, immutable', 'Accept-Ranges': 'bytes' });
     res.send(Buffer.from(r.rows[0].data));
   }));
   app.post('/api/blobs/have', auth, wrap(async (req, res) => {
@@ -521,7 +566,7 @@ async function main() {
   app.delete('/api/admin/users/:id', admin, wrap(async (req, res) => {
     const u = (await db.query(`SELECT username FROM users WHERE id=$1`, [req.params.id])).rows[0]; if (!u) return fail(res, 404, 'No such account');
     if (String((req.body || {}).confirm || '').toLowerCase() !== u.username.toLowerCase()) return fail(res, 400, 'Type the exact username to confirm deleting it.');
-    for (const t of ['sessions', 'states', 'state_backups', 'blobs']) await db.query(`DELETE FROM ${t} WHERE user_id=$1`, [req.params.id]);
+    for (const t of ['sessions', 'states', 'state_backups', 'blobs', 'blob_parts']) await db.query(`DELETE FROM ${t} WHERE user_id=$1`, [req.params.id]);
     await db.query(`DELETE FROM users WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
   }));
@@ -557,7 +602,7 @@ async function main() {
     fail(res, 500, 'Server error — please try again', { id });
   });
 
-  const server = app.listen(PORT, () => console.log(`OLC backend v${VERSION} on :${PORT} (storage: ${db.kind})`));
+  const server = options.listen === false ? null : app.listen(PORT, () => console.log(`OLC backend v${VERSION} on :${PORT} (storage: ${db.kind})`));
   return { app, server, db };
 }
 
