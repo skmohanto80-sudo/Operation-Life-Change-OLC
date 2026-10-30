@@ -14,7 +14,7 @@ module.exports = async function handler(req, res) {
         throw error;
       });
   }
-   try {
+  try {
     const app = await appPromise;
     return app(req, res);
   } catch (error) {
@@ -24,7 +24,7 @@ module.exports = async function handler(req, res) {
       res.end(JSON.stringify({ ok: false, error: 'Backend database initialization failed. Check the Vercel function logs.' }));
     }
   }
-}
+};
 
 // Express must receive the untouched stream so it can parse JSON, gzip and files.
 module.exports.config = { api: { bodyParser: false } };
