@@ -1,12 +1,4 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/[...path].js": {
-      "maxDuration": 60,
-      "includeFiles": "admin.html"
-    }
-  },
-  "rewrites": [
-    { "source": "/admin", "destination": "/admin.html" }
-  ]
+  "version": 2,
+  "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
 }
